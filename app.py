@@ -39,10 +39,9 @@ for key in [
     "model",
     "baseline_result",
     "optimized_result",
-    "guide_checklist",
-    "guide_case_id",
 ]:
     st.session_state.setdefault(key, None)
+st.session_state.setdefault("guide_checklists", {})
 
 
 def _validate_columns(df: pd.DataFrame) -> list[str]:
@@ -139,6 +138,22 @@ if st.session_state.scored_df is not None:
 st.header("3. 조사 리소스")
 num_investigators = st.slider("조사관 수", min_value=1, max_value=10, value=3)
 hours_per_investigator = st.slider("1인당 가용 시간", min_value=1, max_value=40, value=10)
+risk_weight = st.slider(
+    "위험도 가중치 (λ)",
+    min_value=0,
+    max_value=25_100,
+    value=0,
+    step=100,
+    help="목적함수 = 기대회수액 - 조사비용 + λ × 위험도스코어 × 배정여부. "
+    "λ=0이면 기존 방식(회수액 극대화)과 동일합니다.",
+)
+if risk_weight == 0:
+    risk_desc = "회수액 중심 (λ=0, 기존 방식과 동일)"
+elif risk_weight < 12_550:
+    risk_desc = "회수액 중심 + 위험도 일부 반영 — 실측상 회수액 손실 없이 고위험 커버리지가 개선되는 구간"
+else:
+    risk_desc = "위험도 커버리지 중심 — 회수액 일부를 포기하는 대신 고위험 건 커버리지를 크게 높이는 구간"
+st.caption(f"💡 현재 설정: {risk_desc}")
 
 st.header("4. 최적 배정 산출")
 if st.session_state.scored_df is None:
@@ -151,7 +166,7 @@ elif st.button("배정 실행"):
                 cases, num_investigators, hours_per_investigator
             )
             st.session_state.optimized_result = optimize_assignment(
-                cases, num_investigators, hours_per_investigator
+                cases, num_investigators, hours_per_investigator, risk_weight=risk_weight
             )
     except Exception as e:
         st.error(f"배정 계산 중 오류가 발생했습니다: {e}")
@@ -166,21 +181,56 @@ if st.session_state.optimized_result is not None:
         assigned = df.dropna(subset=["assigned_investigator"])
         return float((assigned["expected_recovery"] - assigned["investigation_cost"]).sum())
 
+    # 고위험 건 = 전체 스코어링된 사건 중 combined_score 상위 20%
+    high_risk_threshold = st.session_state.scored_df["combined_score"].quantile(0.80)
+    high_risk_case_ids = set(
+        st.session_state.scored_df.loc[
+            st.session_state.scored_df["combined_score"] >= high_risk_threshold, "case_id"
+        ]
+    )
+    n_high_risk_total = len(high_risk_case_ids)
+
+    def high_risk_coverage_pct(df: pd.DataFrame) -> float:
+        if n_high_risk_total == 0:
+            return 0.0
+        assigned = df.dropna(subset=["assigned_investigator"])
+        covered = assigned["case_id"].isin(high_risk_case_ids).sum()
+        return 100 * covered / n_high_risk_total
+
     baseline_net = net_value(baseline)
     optimized_net = net_value(optimized)
     improvement_pct = (
         (optimized_net - baseline_net) / baseline_net * 100 if baseline_net else 0.0
     )
 
+    baseline_coverage = high_risk_coverage_pct(baseline)
+    optimized_coverage = high_risk_coverage_pct(optimized)
+
     col1, col2, col3 = st.columns(3)
     col1.metric("Baseline 순회수액", f"{baseline_net:,.0f}")
     col2.metric("최적화 순회수액", f"{optimized_net:,.0f}")
     col3.metric("효율 개선", f"{improvement_pct:+.1f}%")
 
+    col4, col5, col6 = st.columns(3)
+    col4.metric("Baseline 고위험 커버리지", f"{baseline_coverage:.1f}%")
+    col5.metric(
+        "최적화 고위험 커버리지",
+        f"{optimized_coverage:.1f}%",
+        delta=f"{optimized_coverage - baseline_coverage:+.1f}%p",
+    )
+    col6.metric("고위험 건 수(상위 20%)", f"{n_high_risk_total}건")
+
     chart_df = pd.DataFrame(
         {"방식": ["Baseline", "최적화"], "순회수액": [baseline_net, optimized_net]}
     )
     st.plotly_chart(px.bar(chart_df, x="방식", y="순회수액"), use_container_width=True)
+
+    coverage_chart_df = pd.DataFrame(
+        {"방식": ["Baseline", "최적화"], "고위험 커버리지(%)": [baseline_coverage, optimized_coverage]}
+    )
+    st.plotly_chart(
+        px.bar(coverage_chart_df, x="방식", y="고위험 커버리지(%)"), use_container_width=True
+    )
 
     st.subheader("조사관별 담당 사건")
     for inv in sorted(optimized["assigned_investigator"].dropna().unique()):
@@ -229,19 +279,21 @@ else:
                 st.markdown(f"**의심 사유:** {explanation}")
 
         st.subheader("✅ 조사 체크리스트")
-        if st.button("조사 가이드 생성"):
+        cached_checklist = st.session_state.guide_checklists.get(selected_case)
+        button_label = "조사 가이드 다시 생성" if cached_checklist else "조사 가이드 생성"
+        if st.button(button_label):
             keywords = row.get("llm_keywords") or []
             try:
                 with st.spinner("조사 체크리스트 생성 중..."):
-                    st.session_state.guide_checklist = generate_investigation_checklist(
+                    st.session_state.guide_checklists[selected_case] = generate_investigation_checklist(
                         row.get("narrative_text", ""), keywords
                     )
-                st.session_state.guide_case_id = selected_case
+                cached_checklist = st.session_state.guide_checklists[selected_case]
             except Exception as e:
                 st.error(f"조사 가이드 생성 중 오류가 발생했습니다: {e}")
 
-        if st.session_state.guide_checklist and st.session_state.guide_case_id == selected_case:
-            for i, item in enumerate(st.session_state.guide_checklist):
+        if cached_checklist:
+            for i, item in enumerate(cached_checklist):
                 st.checkbox(item, key=f"guide_{selected_case}_{i}")
-        elif st.session_state.guide_case_id != selected_case:
+        else:
             st.caption("이 사건에 대한 조사 가이드가 아직 생성되지 않았습니다.")

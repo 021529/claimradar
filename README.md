@@ -62,5 +62,5 @@ claimradar/
 3. ~~LLM 비정형 텍스트 분석 모듈 (합성 데이터 생성 포함)~~
 4. ~~OR-Tools 최적화 모듈 + baseline 비교~~
 5. ~~LLM 조사가이드 생성 모듈~~
-6. ~~Streamlit UI 통합~~ (기본 골격, 세부 UI/UX 다듬기 필요)
-7. 배포 (Streamlit Community Cloud) + 버그 수정
+6. ~~Streamlit UI 통합~~ (에러 처리, 로딩 상태, 사건 상세 뷰(스코어 근거/LLM 요약/체크리스트 통합) 반영 완료)
+7. ~~배포 (Streamlit Community Cloud)~~ — https://github.com/021529/claimradar 연결, 배포 완료. 버그 수정은 계속 진행
