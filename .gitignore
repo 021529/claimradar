@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+*.pkl
+*.joblib
+.DS_Store
+data/raw/
+data/processed/
