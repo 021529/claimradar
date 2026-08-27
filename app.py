@@ -149,10 +149,12 @@ risk_weight = st.slider(
 )
 if risk_weight == 0:
     risk_desc = "회수액 중심 (λ=0, 기존 방식과 동일)"
-elif risk_weight < 12_550:
-    risk_desc = "회수액 중심 + 위험도 일부 반영 — 실측상 회수액 손실 없이 고위험 커버리지가 개선되는 구간"
 else:
-    risk_desc = "위험도 커버리지 중심 — 회수액 일부를 포기하는 대신 고위험 건 커버리지를 크게 높이는 구간"
+    risk_desc = (
+        f"회수액과 위험도스코어를 함께 고려합니다 (λ={risk_weight:,}, 클수록 위험도 비중 ↑). "
+        "실제 회수액·고위험 커버리지 변화는 사건 구성과 조사 캐파에 따라 달라지므로, "
+        "아래 배정 실행 결과에서 직접 확인하세요."
+    )
 st.caption(f"💡 현재 설정: {risk_desc}")
 
 st.header("4. 최적 배정 산출")
@@ -219,6 +221,31 @@ if st.session_state.optimized_result is not None:
         delta=f"{optimized_coverage - baseline_coverage:+.1f}%p",
     )
     col6.metric("고위험 건 수(상위 20%)", f"{n_high_risk_total}건")
+
+    # 목적함수는 "combined_score 합"을 최대화할 뿐 "상위 20% 건수 커버리지"를 직접
+    # 최대화하지 않는다 - 표본이 작을수록 이 둘이 어긋나 커버리지가 baseline보다
+    # 낮게 나올 수 있다. 이 사실을 미리 예측해 문구로 박아두는 대신, 매번 실제
+    # 계산된 숫자를 그대로 요약해 보여줘서 안내문과 결과가 어긋나지 않게 한다.
+    coverage_delta = optimized_coverage - baseline_coverage
+    if optimized_net >= baseline_net and coverage_delta >= 0:
+        st.success(
+            f"이번 조건(조사관 {num_investigators}명 × {hours_per_investigator}시간, λ={risk_weight:,})에서는 "
+            f"최적화가 baseline 대비 회수액 {improvement_pct:+.1f}%, 고위험 커버리지 {coverage_delta:+.1f}%p로 "
+            "둘 다 같거나 개선됐습니다."
+        )
+    elif coverage_delta < 0:
+        st.warning(
+            f"이번 조건(조사관 {num_investigators}명 × {hours_per_investigator}시간, λ={risk_weight:,})에서는 "
+            f"최적화의 고위험 커버리지가 baseline보다 {coverage_delta:.1f}%p 낮습니다. "
+            "목적함수는 위험도스코어의 '합'을 최대화할 뿐 '상위 20% 건수'를 직접 최대화하지 않고, "
+            "baseline은 위험도스코어만 보는 그리디 방식이라 캐파가 작을수록(=사건 수가 적을수록) "
+            "이런 역전이 나타날 수 있습니다. λ를 더 키우거나 조사 캐파를 늘려보세요."
+        )
+    else:
+        st.info(
+            f"이번 조건에서는 최적화가 baseline 대비 회수액 {improvement_pct:+.1f}%, "
+            f"고위험 커버리지 {coverage_delta:+.1f}%p 입니다."
+        )
 
     chart_df = pd.DataFrame(
         {"방식": ["Baseline", "최적화"], "순회수액": [baseline_net, optimized_net]}
