@@ -1,3 +1,5 @@
+import logging
+
 import anthropic
 
 from src.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
@@ -144,4 +146,7 @@ def generate_investigation_checklist(case_summary: str, suspicion_keywords: list
             items = (items + _heuristic_guide(suspicion_keywords))[:_MAX_ITEMS]
         return items[:_MAX_ITEMS]
     except Exception:
+        logging.exception(
+            "generate_investigation_checklist: LLM 호출 실패, 휴리스틱 폴백으로 전환"
+        )
         return _heuristic_guide(suspicion_keywords)
