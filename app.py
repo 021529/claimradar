@@ -141,11 +141,14 @@ hours_per_investigator = st.slider("1인당 가용 시간", min_value=1, max_val
 risk_weight = st.slider(
     "위험도 가중치 (λ)",
     min_value=0,
-    max_value=25_100,
+    max_value=500_000,
     value=0,
-    step=100,
+    step=1000,
     help="목적함수 = 기대회수액 - 조사비용 + λ × 위험도스코어 × 배정여부. "
-    "λ=0이면 기존 방식(회수액 극대화)과 동일합니다.",
+    "λ=0이면 기존 방식(회수액 극대화)과 동일합니다. 데모 데이터 기준 λ가 "
+    "충분히 크면(수십만 단위) 회수액을 포기하는 대신 고위험 건 커버리지가 "
+    "baseline 수준까지 올라갑니다 — 낮은 λ(수만 단위 이하)에서는 거의 "
+    "변화가 없을 수 있습니다.",
 )
 if risk_weight == 0:
     risk_desc = "회수액 중심 (λ=0, 기존 방식과 동일)"
