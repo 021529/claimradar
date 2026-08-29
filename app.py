@@ -180,7 +180,15 @@ elif st.button("스코어링 실행"):
             if "llm_suspicion_adjustment" in df.columns:
                 st.info("사전 계산된 LLM 분석 결과를 재사용합니다 (추가 API 호출 없음).")
                 llm_adjustment = df["llm_suspicion_adjustment"]
-                llm_keywords = df.get("llm_keywords", pd.Series("", index=df.index))
+                # 캐시 CSV는 키워드를 "지연신고|블랙박스 미장착" 형태의 파이프 구분
+                # 문자열로 저장한다(scripts/hierarchical_filtering.py의
+                # get_or_build_llm_cache와 동일 포맷) — 리스트로 되돌려야 문자
+                # 단위가 아니라 키워드 단위로 join/순회된다.
+                llm_keywords = (
+                    df.get("llm_keywords", pd.Series("", index=df.index))
+                    .fillna("")
+                    .apply(lambda s: [k for k in s.split("|") if k] if isinstance(s, str) else [])
+                )
                 llm_explanation = df.get("llm_explanation", pd.Series("", index=df.index))
             else:
                 llm_adjustment = pd.Series(0.0, index=df.index)
