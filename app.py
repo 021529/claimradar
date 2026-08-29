@@ -63,6 +63,67 @@ def _feature_evidence_table(model, row: pd.Series, all_cases: pd.DataFrame) -> p
     return table
 
 
+def _net_value(df: pd.DataFrame) -> float:
+    assigned = df.dropna(subset=["assigned_investigator"])
+    return float((assigned["expected_recovery"] - assigned["investigation_cost"]).sum())
+
+
+def _high_risk_ids(scored_df: pd.DataFrame, quantile: float = 0.80) -> set:
+    threshold = scored_df["combined_score"].quantile(quantile)
+    return set(scored_df.loc[scored_df["combined_score"] >= threshold, "case_id"])
+
+
+def _coverage_pct(df: pd.DataFrame, high_risk_ids: set) -> float:
+    if not high_risk_ids:
+        return 0.0
+    assigned = df.dropna(subset=["assigned_investigator"])
+    covered = assigned["case_id"].isin(high_risk_ids).sum()
+    return 100 * covered / len(high_risk_ids)
+
+
+# 24건 샘플 데이터(조사관 3명x10시간) 기준 lambda_sweep_24case.py 재현 결과로 정한 대표값.
+# 0~90,000 사이는 완만한 전환 구간, 90,000~450,000은 평평, 480,000부터 baseline과
+# 동일(고위험 커버리지 100%)로 수렴해 90,000을 "균형", 480,000을 "고위험 차단 우선"의
+# 대표값으로 삼았다. 실제 카드에 표시되는 숫자는 이 값이 아니라 현재 업로드된 데이터로
+# 매번 다시 계산한 값이다 (아래 _compute_policy_previews).
+POLICY_PRESETS = {
+    "회수액 우선": 0,
+    "균형": 90_000,
+    "고위험 차단 우선": 480_000,
+}
+POLICY_DESCRIPTIONS = {
+    "회수액 우선": "순회수액을 최대화합니다. 고위험 건이라도 기대회수액이 낮으면 배정에서 밀릴 수 있습니다.",
+    "균형": "순회수액과 고위험 커버리지를 절충합니다.",
+    "고위험 차단 우선": "고위험 건을 최대한 빠짐없이 조사합니다. 순회수액은 가장 낮아질 수 있습니다.",
+}
+
+
+@st.cache_data(show_spinner="정책별 예상 결과 계산 중...")
+def _compute_policy_previews(
+    scored_df: pd.DataFrame, num_investigators: int, hours_per_investigator: int
+) -> dict:
+    """현재 데이터·캐파 기준으로 3개 프리셋 λ 각각을 실제로 최적화 실행해 미리보기 수치를 만든다."""
+    high_risk_ids = _high_risk_ids(scored_df)
+    previews = {}
+    for label, lam in POLICY_PRESETS.items():
+        optimized = optimize_assignment(
+            scored_df, num_investigators, hours_per_investigator, risk_weight=lam
+        )
+        previews[label] = {
+            "net": _net_value(optimized),
+            "coverage": _coverage_pct(optimized, high_risk_ids),
+        }
+    return previews
+
+
+def _lambda_regime(risk_weight: int) -> str:
+    if risk_weight <= 0:
+        return "회수액 우선 구간"
+    if risk_weight < POLICY_PRESETS["고위험 차단 우선"]:
+        return "균형(전환) 구간"
+    return "고위험 차단 우선 구간"
+
+
 st.header("1. 청구 데이터")
 source = st.radio("데이터 소스", ["샘플로 체험하기", "CSV 업로드"], horizontal=True)
 
@@ -138,18 +199,63 @@ if st.session_state.scored_df is not None:
 st.header("3. 조사 리소스")
 num_investigators = st.slider("조사관 수", min_value=1, max_value=10, value=3)
 hours_per_investigator = st.slider("1인당 가용 시간", min_value=1, max_value=40, value=10)
-risk_weight = st.slider(
-    "위험도 가중치 (λ)",
-    min_value=0,
-    max_value=500_000,
-    value=0,
-    step=1000,
-    help="목적함수 = 기대회수액 - 조사비용 + λ × 위험도스코어 × 배정여부. "
-    "λ=0이면 기존 방식(회수액 극대화)과 동일합니다. 데모 데이터 기준 λ가 "
-    "충분히 크면(수십만 단위) 회수액을 포기하는 대신 고위험 건 커버리지가 "
-    "baseline 수준까지 올라갑니다 — 낮은 λ(수만 단위 이하)에서는 거의 "
-    "변화가 없을 수 있습니다.",
-)
+
+st.subheader("조사 정책 선택")
+st.session_state.setdefault("risk_weight_slider", POLICY_PRESETS["회수액 우선"])
+
+if st.session_state.scored_df is not None:
+    try:
+        policy_previews = _compute_policy_previews(
+            st.session_state.scored_df, num_investigators, hours_per_investigator
+        )
+    except Exception:
+        policy_previews = None
+else:
+    policy_previews = None
+
+current_lambda = st.session_state.risk_weight_slider
+policy_cols = st.columns(3)
+for col, label in zip(policy_cols, POLICY_PRESETS):
+    with col:
+        selected = current_lambda == POLICY_PRESETS[label]
+        st.markdown(f"**{'✅ ' if selected else ''}{label}**")
+        st.caption(POLICY_DESCRIPTIONS[label])
+        if policy_previews is not None:
+            st.metric("예상 순회수액", f"{policy_previews[label]['net']:,.0f}원")
+            st.metric("고위험 커버리지", f"{policy_previews[label]['coverage']:.1f}%")
+        else:
+            st.metric("예상 순회수액", "—")
+            st.metric("고위험 커버리지", "—")
+            st.caption("스코어링 실행 후 예상 결과가 표시됩니다.")
+        if st.button(
+            "이 정책 선택",
+            key=f"policy_btn_{label}",
+            type="primary" if selected else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.risk_weight_slider = POLICY_PRESETS[label]
+            st.rerun()
+
+with st.expander("🔧 고급 설정: λ 직접 조정"):
+    st.slider(
+        "위험도 가중치 (λ)",
+        min_value=0,
+        max_value=500_000,
+        step=1000,
+        key="risk_weight_slider",
+        help="목적함수 = 기대회수액 - 조사비용 + λ × 위험도스코어 × 배정여부. "
+        "λ=0이면 기존 방식(회수액 극대화)과 동일합니다. 데모 데이터 기준 λ가 "
+        "충분히 크면(수십만 단위) 회수액을 포기하는 대신 고위험 건 커버리지가 "
+        "baseline 수준까지 올라갑니다 — 낮은 λ(수만 단위 이하)에서는 거의 "
+        "변화가 없을 수 있습니다. 위 프리셋 값과 다르게 조정하면 세 정책 카드 "
+        "중 어느 것도 선택됨(✅) 표시가 없는 상태가 됩니다.",
+    )
+    st.caption(
+        f"현재 λ={st.session_state.risk_weight_slider:,} → "
+        f"{_lambda_regime(st.session_state.risk_weight_slider)}"
+    )
+
+risk_weight = st.session_state.risk_weight_slider
 if risk_weight == 0:
     risk_desc = "회수액 중심 (λ=0, 기존 방식과 동일)"
 else:
@@ -182,34 +288,18 @@ if st.session_state.optimized_result is not None:
     baseline = st.session_state.baseline_result
     optimized = st.session_state.optimized_result
 
-    def net_value(df: pd.DataFrame) -> float:
-        assigned = df.dropna(subset=["assigned_investigator"])
-        return float((assigned["expected_recovery"] - assigned["investigation_cost"]).sum())
-
     # 고위험 건 = 전체 스코어링된 사건 중 combined_score 상위 20%
-    high_risk_threshold = st.session_state.scored_df["combined_score"].quantile(0.80)
-    high_risk_case_ids = set(
-        st.session_state.scored_df.loc[
-            st.session_state.scored_df["combined_score"] >= high_risk_threshold, "case_id"
-        ]
-    )
+    high_risk_case_ids = _high_risk_ids(st.session_state.scored_df)
     n_high_risk_total = len(high_risk_case_ids)
 
-    def high_risk_coverage_pct(df: pd.DataFrame) -> float:
-        if n_high_risk_total == 0:
-            return 0.0
-        assigned = df.dropna(subset=["assigned_investigator"])
-        covered = assigned["case_id"].isin(high_risk_case_ids).sum()
-        return 100 * covered / n_high_risk_total
-
-    baseline_net = net_value(baseline)
-    optimized_net = net_value(optimized)
+    baseline_net = _net_value(baseline)
+    optimized_net = _net_value(optimized)
     improvement_pct = (
         (optimized_net - baseline_net) / baseline_net * 100 if baseline_net else 0.0
     )
 
-    baseline_coverage = high_risk_coverage_pct(baseline)
-    optimized_coverage = high_risk_coverage_pct(optimized)
+    baseline_coverage = _coverage_pct(baseline, high_risk_case_ids)
+    optimized_coverage = _coverage_pct(optimized, high_risk_case_ids)
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Baseline 순회수액", f"{baseline_net:,.0f}")
