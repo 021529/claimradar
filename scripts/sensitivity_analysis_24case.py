@@ -2,11 +2,14 @@
 측정됐던 조건(24건 data/sample/sample_claims.csv, 3명 x 10시간)에 그대로
 적용해 300건 버전과 직접 비교 가능한 수치를 낸다.
 
-sample_claims.csv에는 llm_suspicion_adjustment 캐시가 없어(순수 재무 파라미터만
-바꾸는 이 실험에서는 API를 다시 호출하지 않기 위해) 휴리스틱 폴백
-(_heuristic_analysis, API 호출 0건)으로 1회 계산해 모든 시나리오에 고정값으로
-재사용한다. 이는 300건 버전이 실제 LLM 캐시값을 재사용한 것과의 방법론적 차이이며,
-두 결과를 같은 근거로 취급하려면 이 차이를 반드시 함께 밝혀야 한다.
+2026-08-30: sample_claims.csv에 실제 LLM 캐시가 영구 병합되어(순수 재무
+파라미터만 바꾸는 이 실험에서도 API 재호출 없이) 배포 앱과 정확히 같은
+llm_suspicion_adjustment 값을 모든 시나리오에 고정 재사용한다 — 300건 버전이
+실제 LLM 캐시값을 쓰는 것과 이제 방법론이 동일하다.
+
+2026-08-30 ML 백본 보강(범주형 One-Hot + class_weight='balanced') 이후 재실행됨.
+옛 5피처+휴리스틱 기준 "+23.9%~+63.7%" 수치는
+scripts/ml_backbone_reexperiment_2026-08-30.md 참고.
 
 사용법:
     python scripts/sensitivity_analysis_24case.py
@@ -22,19 +25,12 @@ import pandas as pd  # noqa: E402
 from src.optimization.assignment import optimize_assignment  # noqa: E402
 from src.optimization.baseline import baseline_assignment  # noqa: E402
 from src.scoring.combine import combine_scores  # noqa: E402
-from src.scoring.llm_analysis import _heuristic_analysis  # noqa: E402
+from src.scoring.features import feature_cols_for  # noqa: E402
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model  # noqa: E402
 
 SAMPLE_PATH = Path("data/sample/sample_claims.csv")
 RAW_PATH = Path("data/processed/claims_with_narratives.csv")
 
-NUMERIC_FEATURE_COLS = [
-    "driver_age",
-    "vehicle_price",
-    "deductible",
-    "driver_rating",
-    "past_number_of_claims",
-]
 LABEL_COL = "FraudFound_P"
 
 NUM_INVESTIGATORS = 3
@@ -136,12 +132,12 @@ def main() -> None:
     merged = _load_base_data()
 
     with_hours = _apply_financial_params(merged, BASE_RECOVERY_MULT, BASE_HOURS_WEIGHT, BASE_COST_PER_HOUR)
-    model, _ = train_fraud_model(with_hours[NUMERIC_FEATURE_COLS + [LABEL_COL]])
-    ml_score = predict_fraud_score(model, with_hours[NUMERIC_FEATURE_COLS])
+    feature_cols = feature_cols_for(with_hours)
+    model, _ = train_fraud_model(with_hours[feature_cols + [LABEL_COL]], class_weight="balanced")
+    ml_score = predict_fraud_score(model, with_hours[feature_cols])
 
-    print("주의: llm_suspicion_adjustment 캐시가 없어 휴리스틱 폴백으로 1회 계산 (API 호출 0건).")
-    llm_adjustment = with_hours["narrative_text"].apply(lambda t: _heuristic_analysis(t).suspicion_adjustment)
-    combined_score = combine_scores(ml_score, llm_adjustment)
+    print("sample_claims.csv에 병합된 실제 LLM 캐시 재사용 (API 호출 0건, 배포 앱과 동일 값).")
+    combined_score = combine_scores(ml_score, with_hours["llm_suspicion_adjustment"])
 
     total_demand = with_hours["expected_hours"].sum()
     print(

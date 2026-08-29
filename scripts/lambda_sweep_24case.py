@@ -2,16 +2,15 @@
 "샘플로 체험하기" 버튼이 로드하는 24건 data/sample/sample_claims.csv 기준으로
 돌려 300건 결과와 나란히 비교할 수 있게 한다.
 
-sample_claims.csv에는 llm_suspicion_adjustment 캐시가 없어(API 비용 없이
-순수 배정 로직만 보기 위해) 휴리스틱 폴백(_heuristic_analysis, API 호출 0건)
-으로 1회 계산해 고정 재사용한다. expected_hours/expected_recovery/
-investigation_cost는 이미 공식에 맞게 재생성된 값을 그대로 쓴다
-(scripts/generate_sample_claims.py 참고).
+2026-08-30: sample_claims.csv에 실제 LLM 캐시(sample_claims_24case_llm_cache.csv)가
+영구 병합되어(scripts/generate_sample_claims.py 참고), 배포 앱("샘플로 체험하기")과
+이 스크립트가 정확히 같은 llm_suspicion_adjustment 값을 쓴다 — 문서 수치와 배포
+화면 수치가 일치하도록 하기 위함. API 호출 0건(캐시 재사용). expected_hours/
+expected_recovery/investigation_cost도 이미 공식에 맞게 재생성된 값 그대로 쓴다.
 
-이 24건 데이터에서는 λ=30,000~500,000 구간에서 회수액↓/고위험 커버리지↑가
-40%→60%→80%→100%로 뚜렷한 4단계 계단을 그리며 나타난다(옛 슬라이더 범위
-0~25,100에서는 전혀 안 보임). app.py 슬라이더 최댓값을 500,000으로 확장한
-근거가 이 결과다.
+2026-08-30 ML 백본 보강(범주형 One-Hot + class_weight='balanced', src/scoring/features.py)
+이후 재실행됨 — 이 스윕에서 나온 λ 구간·계단 형태가 바뀌었을 수 있다. 옛 5피처
+모델 기준 수치는 scripts/ml_backbone_reexperiment_2026-08-30.md에 나란히 남겨뒀다.
 
 사용법:
     python scripts/lambda_sweep_24case.py
@@ -27,29 +26,23 @@ import pandas as pd  # noqa: E402
 from src.optimization.assignment import optimize_assignment  # noqa: E402
 from src.optimization.baseline import baseline_assignment  # noqa: E402
 from src.scoring.combine import combine_scores  # noqa: E402
-from src.scoring.llm_analysis import _heuristic_analysis  # noqa: E402
+from src.scoring.features import feature_cols_for  # noqa: E402
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model  # noqa: E402
 
 DATA_PATH = Path("data/sample/sample_claims.csv")
 
-NUMERIC_FEATURE_COLS = [
-    "driver_age",
-    "vehicle_price",
-    "deductible",
-    "driver_rating",
-    "past_number_of_claims",
-]
 LABEL_COL = "FraudFound_P"
 
 NUM_INVESTIGATORS = 3
 HOURS_PER_INVESTIGATOR = 10
 HIGH_RISK_QUANTILE = 0.80
 
-# 24건 데이터는 0~25,100(옛 슬라이더 범위)에서는 전혀 안 움직이다가, 30,000
-# 부근부터 500,000 부근까지 4단계로 뚜렷한 회수액↓/고위험 커버리지↑ 트레이드오프
-# 계단을 그린다(40%→60%→80%→100%). 480,000 이상에서는 baseline과 완전히
-# 동일한 배정(커버리지 100%, 개선율 0%)으로 수렴한다.
-LAMBDAS = [0, 25100, 30000, 50000, 80000, 90000, 100000, 200000, 300000, 450000, 480000, 500000]
+# 실제 LLM 캐시 기준 계단 50%→66.7%→83.3%→100%가 0~80,000 구간에 몰려 있어
+# 그 구간을 촘촘히, 나머지는 성긴 그리드로 확인한다.
+LAMBDAS = [
+    0, 20000, 40000, 42000, 44000, 50000, 60000, 64000, 66000, 70000, 78000,
+    80000, 90000, 100000, 150000, 200000, 250000, 300000, 400000, 480000, 500000,
+]
 
 
 def net_value(df: pd.DataFrame) -> float:
@@ -66,15 +59,15 @@ def coverage_pct(df: pd.DataFrame, high_risk_ids: set, n_high_risk: int) -> floa
 
 
 def build_combined_score(df: pd.DataFrame) -> pd.Series:
-    model, _ = train_fraud_model(df[NUMERIC_FEATURE_COLS + [LABEL_COL]])
-    ml_score = predict_fraud_score(model, df[NUMERIC_FEATURE_COLS])
-    llm_adjustment = df["narrative_text"].apply(lambda t: _heuristic_analysis(t).suspicion_adjustment)
-    return combine_scores(ml_score, llm_adjustment)
+    feature_cols = feature_cols_for(df)
+    model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
+    ml_score = predict_fraud_score(model, df[feature_cols])
+    return combine_scores(ml_score, df["llm_suspicion_adjustment"])
 
 
 def main() -> None:
     df = pd.read_csv(DATA_PATH)
-    print("주의: llm_suspicion_adjustment 캐시가 없어 휴리스틱 폴백으로 1회 계산 (API 호출 0건).\n")
+    print("sample_claims.csv에 병합된 실제 LLM 캐시 재사용 (API 호출 0건, 배포 앱과 동일 값).\n")
     df["combined_score"] = build_combined_score(df)
 
     high_risk_threshold = df["combined_score"].quantile(HIGH_RISK_QUANTILE)

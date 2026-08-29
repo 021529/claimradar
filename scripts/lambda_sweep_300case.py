@@ -10,8 +10,11 @@ baseline 대비 순회수액 개선율과 고위험(상위 20%) 커버리지가 
 부근)을 확인했다. app.py 슬라이더 최댓값도 이 결과를 반영해 500,000으로
 확장했다.
 
-데이터: data/processed/app_demo_sample.csv (300건). ml_score, llm_suspicion_adjustment
-는 이미 계산/캐싱돼 있어 API 호출 없음.
+데이터: data/processed/app_demo_sample.csv (300건). llm_suspicion_adjustment
+는 이미 계산/캐싱돼 있어 API 호출 없음 (ml_score는 매 실행 시 재학습).
+
+2026-08-30 ML 백본 보강(범주형 One-Hot + class_weight='balanced') 이후 재실행됨.
+옛 5피처 모델 기준 수치는 scripts/ml_backbone_reexperiment_2026-08-30.md 참고.
 
 사용법:
     python scripts/lambda_sweep_300case.py
@@ -27,17 +30,11 @@ import pandas as pd  # noqa: E402
 from src.optimization.assignment import optimize_assignment  # noqa: E402
 from src.optimization.baseline import baseline_assignment  # noqa: E402
 from src.scoring.combine import combine_scores  # noqa: E402
+from src.scoring.features import feature_cols_for  # noqa: E402
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model  # noqa: E402
 
 DATA_PATH = Path("data/processed/app_demo_sample.csv")
 
-NUMERIC_FEATURE_COLS = [
-    "driver_age",
-    "vehicle_price",
-    "deductible",
-    "driver_rating",
-    "past_number_of_claims",
-]
 LABEL_COL = "FraudFound_P"
 
 NUM_INVESTIGATORS = 3
@@ -65,8 +62,9 @@ def coverage_pct(df: pd.DataFrame, high_risk_ids: set, n_high_risk: int) -> floa
 
 
 def build_combined_score(df: pd.DataFrame) -> pd.Series:
-    model, _ = train_fraud_model(df[NUMERIC_FEATURE_COLS + [LABEL_COL]])
-    ml_score = predict_fraud_score(model, df[NUMERIC_FEATURE_COLS])
+    feature_cols = feature_cols_for(df)
+    model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
+    ml_score = predict_fraud_score(model, df[feature_cols])
     return combine_scores(ml_score, df["llm_suspicion_adjustment"])
 
 

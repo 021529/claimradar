@@ -22,6 +22,10 @@ assignment.py)의 순회수액 개선율이 파라미터 값에 관계없이 항
 
 기준값: recovery_mult=0.4, hours_weight=1.0, cost_per_hour=350 (원 공식과 동일)
 
+2026-08-30 ML 백본 보강(범주형 One-Hot + class_weight='balanced') 이후 재실행됨.
+옛 5피처 모델 기준 "+138.9%~+228.1%" 수치는 scripts/ml_backbone_reexperiment_2026-08-30.md
+참고.
+
 사용법:
     python scripts/sensitivity_analysis.py
 """
@@ -36,18 +40,12 @@ import pandas as pd  # noqa: E402
 from src.optimization.assignment import optimize_assignment  # noqa: E402
 from src.optimization.baseline import baseline_assignment  # noqa: E402
 from src.scoring.combine import combine_scores  # noqa: E402
+from src.scoring.features import feature_cols_for  # noqa: E402
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model  # noqa: E402
 
 DEMO_PATH = Path("data/processed/app_demo_sample.csv")
 RAW_PATH = Path("data/processed/claims_with_narratives.csv")
 
-NUMERIC_FEATURE_COLS = [
-    "driver_age",
-    "vehicle_price",
-    "deductible",
-    "driver_rating",
-    "past_number_of_claims",
-]
 LABEL_COL = "FraudFound_P"
 
 NUM_INVESTIGATORS = 3
@@ -152,8 +150,9 @@ def main() -> None:
     merged = _load_base_data()
 
     with_hours = _apply_financial_params(merged, BASE_RECOVERY_MULT, BASE_HOURS_WEIGHT, BASE_COST_PER_HOUR)
-    model, _ = train_fraud_model(with_hours[NUMERIC_FEATURE_COLS + [LABEL_COL]])
-    ml_score = predict_fraud_score(model, with_hours[NUMERIC_FEATURE_COLS])
+    feature_cols = feature_cols_for(with_hours)
+    model, _ = train_fraud_model(with_hours[feature_cols + [LABEL_COL]], class_weight="balanced")
+    ml_score = predict_fraud_score(model, with_hours[feature_cols])
     llm_adjustment = with_hours["llm_suspicion_adjustment"]
     combined_score = combine_scores(ml_score, llm_adjustment)
 

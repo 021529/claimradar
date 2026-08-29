@@ -18,6 +18,12 @@ scripts/lambda_sweep_24case.py와 동일한 24건 데모 데이터(data/sample/s
 "나중에 더 잘 맞는 조합"을 놓치는 배낭문제형 손실이 구조적으로 발생하기
 때문이다.
 
+2026-08-30: sample_claims.csv에 실제 LLM 캐시가 영구 병합되어(scripts/generate_sample_claims.py
+참고) 배포 앱과 정확히 같은 llm_suspicion_adjustment 값을 쓴다 (API 호출 0건).
+같은 날 ML 백본 보강(범주형 One-Hot + class_weight='balanced')도 반영됨 — 옛
+5피처+휴리스틱 모델 기준 "최대 gap 6.22%" 등은 scripts/ml_backbone_reexperiment_2026-08-30.md
+참고.
+
 사용법:
     python scripts/greedy_vs_ortools_comparison.py
 """
@@ -33,28 +39,23 @@ from src.optimization.assignment import optimize_assignment  # noqa: E402
 from src.optimization.baseline import baseline_assignment  # noqa: E402
 from src.optimization.greedy_strong import risk_weighted_greedy  # noqa: E402
 from src.scoring.combine import combine_scores  # noqa: E402
-from src.scoring.llm_analysis import _heuristic_analysis  # noqa: E402
+from src.scoring.features import feature_cols_for  # noqa: E402
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model  # noqa: E402
 
 DATA_PATH = Path("data/sample/sample_claims.csv")
 
-NUMERIC_FEATURE_COLS = [
-    "driver_age",
-    "vehicle_price",
-    "deductible",
-    "driver_rating",
-    "past_number_of_claims",
-]
 LABEL_COL = "FraudFound_P"
 
 NUM_INVESTIGATORS = 3
 HOURS_PER_INVESTIGATOR = 10
 HIGH_RISK_QUANTILE = 0.80
 
-# scripts/lambda_sweep_24case.py의 스윕 구간(계단이 40%→60%→80%→100%로
-# 나타나는 30,000~500,000 구간 포함)과 동일하게 맞춰, 이미 확인된 트레이드오프
-# 구간에서 OR-Tools와 그리디가 실제로 얼마나 벌어지는지를 본다.
-LAMBDAS = [0, 6300, 25100, 30000, 50000, 80000, 90000, 100000, 200000, 300000, 450000, 480000, 500000]
+# scripts/lambda_sweep_24case.py와 동일한 스윕 그리드 사용 (실제 LLM 캐시 기준
+# 계단 50%→66.7%→83.3%→100%가 나타나는 0~80,000 구간을 촘촘히 포함)
+LAMBDAS = [
+    0, 20000, 40000, 42000, 44000, 50000, 60000, 64000, 66000, 70000, 78000,
+    80000, 90000, 100000, 150000, 200000, 250000, 300000, 400000, 480000, 500000,
+]
 
 
 def net_value(df: pd.DataFrame) -> float:
@@ -78,15 +79,15 @@ def coverage_pct(df: pd.DataFrame, high_risk_ids: set, n_high_risk: int) -> floa
 
 
 def build_combined_score(df: pd.DataFrame) -> pd.Series:
-    model, _ = train_fraud_model(df[NUMERIC_FEATURE_COLS + [LABEL_COL]])
-    ml_score = predict_fraud_score(model, df[NUMERIC_FEATURE_COLS])
-    llm_adjustment = df["narrative_text"].apply(lambda t: _heuristic_analysis(t).suspicion_adjustment)
-    return combine_scores(ml_score, llm_adjustment)
+    feature_cols = feature_cols_for(df)
+    model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
+    ml_score = predict_fraud_score(model, df[feature_cols])
+    return combine_scores(ml_score, df["llm_suspicion_adjustment"])
 
 
 def main() -> None:
     df = pd.read_csv(DATA_PATH)
-    print("주의: llm_suspicion_adjustment 캐시가 없어 휴리스틱 폴백으로 1회 계산 (API 호출 0건).\n")
+    print("sample_claims.csv에 병합된 실제 LLM 캐시 재사용 (API 호출 0건, 배포 앱과 동일 값).\n")
     df["combined_score"] = build_combined_score(df)
 
     high_risk_threshold = df["combined_score"].quantile(HIGH_RISK_QUANTILE)

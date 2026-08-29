@@ -21,6 +21,11 @@ API 비용: sample_claims.csv에는 llm_suspicion_adjustment 캐시가 없어 �
 저장한다 (한글 레이블이 섞인 고정폭 콘솔 표는 폭이 깨지기 쉬우므로, 파일에는 순수 마크다운
 파이프 표만 남긴다).
 
+2026-08-30 ML 백본 보강(범주형 One-Hot + class_weight='balanced') 이후 재실행됨 —
+ml_score 분포가 바뀌어 THRESHOLD_LEVELS/RISK_WEIGHTS를 새 분포·새 λ 대표값에
+맞게 조정했다. 옛 5피처 모델 기준 수치는 scripts/ml_backbone_reexperiment_2026-08-30.md
+참고.
+
 사용법:
     python scripts/hierarchical_filtering.py
 """
@@ -35,6 +40,7 @@ import pandas as pd  # noqa: E402
 from src.config import ANTHROPIC_MODEL  # noqa: E402
 from src.optimization.assignment import optimize_assignment  # noqa: E402
 from src.scoring.combine import combine_scores  # noqa: E402
+from src.scoring.features import feature_cols_for  # noqa: E402
 from src.scoring.llm_analysis import analyze_narrative, get_usage_totals, reset_usage_totals  # noqa: E402
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model  # noqa: E402
 
@@ -42,13 +48,6 @@ DATA_PATH = Path("data/sample/sample_claims.csv")
 LLM_CACHE_PATH = Path("data/processed/sample_claims_24case_llm_cache.csv")
 REPORT_PATH = Path("scripts/hierarchical_filtering_results.md")
 
-NUMERIC_FEATURE_COLS = [
-    "driver_age",
-    "vehicle_price",
-    "deductible",
-    "driver_rating",
-    "past_number_of_claims",
-]
 LABEL_COL = "FraudFound_P"
 
 NUM_INVESTIGATORS = 3
@@ -59,9 +58,6 @@ HIGH_RISK_QUANTILE = 0.80
 SONNET_5_INPUT_PRICE_PER_M = 2.00
 SONNET_5_OUTPUT_PRICE_PER_M = 10.00
 
-# 24건 데이터의 ml_score 분포는 0.02~0.96, 중앙값 0.74로 상위 구간에 몰려 있다
-# (0.7~0.96 사이에 13건 밀집). 0.3/0.5/0.7만으로는 절감 폭 차이가 크지 않아
-# 0.85를 추가해 "많이 걸러냈을 때" 구간까지 포함한다.
 TOP_PCT_LEVELS = [0.10, 0.20, 0.30, 0.50, 1.00]
 THRESHOLD_LEVELS = [0.3, 0.5, 0.7, 0.85]
 
@@ -69,9 +65,10 @@ THRESHOLD_LEVELS = [0.3, 0.5, 0.7, 0.85]
 # combined_score(=LLM 분석 결과)가 목적함수에서 완전히 사라져, 필터링으로 LLM을
 # 몇 건 스킵하든 최종 배정이 똑같아진다 — "필터링이 최종 품질에 영향 없다"가
 # 아니라 λ=0이라는 조건 자체가 그 결과를 강제한 것이다. 그래서 λ=0(회수액만
-# 볼 때)과, scripts/lambda_sweep_24case.py에서 확인된 안정적 트레이드오프 지점
-# λ=90,000(위험도가 실제로 반영될 때) 둘 다 비교해 이 효과를 명시적으로 보여준다.
-RISK_WEIGHTS = [0, 90000]
+# 볼 때)과, app.py POLICY_PRESETS["균형"]=50,000(순회수액이 회수액 우선/고위험
+# 차단 우선의 산술 중간값에 가장 가까운 전환 구간 대표값, 위험도가 실제로
+# 반영될 때) 둘 다 비교해 이 효과를 명시적으로 보여준다.
+RISK_WEIGHTS = [0, 50000]
 
 
 def get_or_build_llm_cache(df: pd.DataFrame) -> pd.DataFrame:
@@ -113,8 +110,9 @@ def get_or_build_llm_cache(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_ml_scores(df: pd.DataFrame) -> pd.Series:
-    model, _ = train_fraud_model(df[NUMERIC_FEATURE_COLS + [LABEL_COL]])
-    return predict_fraud_score(model, df[NUMERIC_FEATURE_COLS])
+    feature_cols = feature_cols_for(df)
+    model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
+    return predict_fraud_score(model, df[feature_cols])
 
 
 def select_mask_top_pct(ml_score: pd.Series, pct: float) -> pd.Series:
@@ -163,6 +161,10 @@ def coverage_pct(df: pd.DataFrame, high_risk_ids: set, n_high_risk: int) -> floa
 
 def main() -> None:
     df = pd.read_csv(DATA_PATH)
+    # ML 스코어링 모델 보강으로 sample_claims.csv에 이제 llm_* 컬럼이 자체
+    # 포함돼 있다 — 이 스크립트는 mask 기준으로 선택적 병합을 직접 하므로,
+    # 미리 지워야 아래 merge(llm_cache)에서 _x/_y 접미사 충돌이 안 생긴다.
+    df = df.drop(columns=["llm_keywords", "llm_suspicion_adjustment", "llm_explanation"], errors="ignore")
     ml_score = build_ml_scores(df)
     llm_cache = get_or_build_llm_cache(df)
 

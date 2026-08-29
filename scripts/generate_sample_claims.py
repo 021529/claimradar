@@ -8,6 +8,15 @@ transform()을 그대로 재사용해 Kaggle 원본 24건(사기 12 / 정상 12)
 맞게 통과시켜 sample_claims.csv를 재생성한다. API 호출 없음 (narrative_text는
 data/processed/claims_with_narratives.csv에 이미 생성돼 있는 값을 그대로 사용).
 
+2026-08-30: 배포 앱("샘플로 체험하기")과 오프라인 분석 스크립트가 서로 다른
+LLM 결과(앱=실제 API 호출, 스크립트=휴리스틱 폴백)를 써서 문서 수치와 배포
+화면 수치가 어긋나는 문제가 있었다. 이후 실제 LLM 캐시
+(data/processed/sample_claims_24case_llm_cache.csv)를 sample_claims.csv에
+영구 병합해, 앱도 스코어링 시 이 캐시를 재사용(API 호출 0건)하도록 통일했다.
+이 스크립트를 재실행하면 transform()이 파일을 새로 만들면서 그 캐시 컬럼이
+빠지므로, 아래에서 다시 병합해준다 — 앱과 스크립트가 항상 같은 LLM 결과를
+쓰게 유지하기 위한 필수 단계다.
+
 사용법:
     python scripts/generate_sample_claims.py
 
@@ -24,6 +33,7 @@ from scripts.prepare_app_dataset import _llm_generated_mask, transform  # noqa: 
 
 INPUT_PATH = Path("data/processed/claims_with_narratives.csv")
 OUTPUT_PATH = Path("data/sample/sample_claims.csv")
+LLM_CACHE_PATH = Path("data/processed/sample_claims_24case_llm_cache.csv")
 FRAUD_COUNT = 12
 NORMAL_COUNT = 12
 SEED = 42
@@ -43,11 +53,20 @@ def main() -> None:
     combined = pd.concat([fraud_sample, normal_sample]).sample(frac=1, random_state=SEED)
     result = transform(combined)
 
+    if LLM_CACHE_PATH.exists():
+        cache = pd.read_csv(LLM_CACHE_PATH)
+        result = result.merge(cache, on="case_id", how="left")
+        missing = result["llm_suspicion_adjustment"].isna().sum()
+        if missing:
+            raise RuntimeError(
+                f"{missing}건이 {LLM_CACHE_PATH}에 없음 — 표본 구성이 바뀌었으면 캐시를 다시 만들어야 함"
+            )
+
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(OUTPUT_PATH, index=False, encoding="utf-8")
     print(
         f"완료: {OUTPUT_PATH} ({len(result)}건, 사기 {len(fraud_sample)}건 / "
-        f"정상 {len(normal_sample)}건)"
+        f"정상 {len(normal_sample)}건, LLM 캐시 병합됨: {LLM_CACHE_PATH.exists()})"
     )
 
 

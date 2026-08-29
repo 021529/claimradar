@@ -8,40 +8,10 @@ from src.guide.guide_generator import generate_investigation_checklist
 from src.optimization.assignment import optimize_assignment
 from src.optimization.baseline import baseline_assignment
 from src.scoring.combine import combine_scores
+from src.scoring.features import CORE_NUMERIC_FEATURE_COLS, feature_cols_for
 from src.scoring.llm_analysis import analyze_narrative
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model
 
-CORE_NUMERIC_FEATURE_COLS = [
-    "driver_age",
-    "vehicle_price",
-    "deductible",
-    "driver_rating",
-    "past_number_of_claims",
-]
-# 범주형 피처 보강(scripts/ml_model_comparison_results.md에서 AUC-ROC 0.53→0.80,
-# PR-AUC 0.07→0.17로 검증됨). scripts/prepare_app_dataset.py가 만드는 컬럼과
-# 정확히 일치해야 한다. CSV 업로드 등 옛 5피처 스키마와도 호환되도록 "존재하는
-# 것만" 쓰는 선택적 목록으로 둔다 — 없어도 스코어링은 CORE_NUMERIC_FEATURE_COLS만으로 동작한다.
-OPTIONAL_CATEGORICAL_FEATURE_COLS = [
-    "age_of_vehicle_rank",
-    "age_of_policyholder_rank",
-    "days_policy_accident_rank",
-    "days_policy_claim_rank",
-    "number_of_suppliments_rank",
-    "address_change_claim_rank",
-    "number_of_cars_rank",
-    "Make",
-    "Sex",
-    "MaritalStatus",
-    "Fault",
-    "PolicyType",
-    "VehicleCategory",
-    "AccidentArea",
-    "PoliceReportFiled",
-    "WitnessPresent",
-    "AgentType",
-    "BasePolicy",
-]
 LABEL_COL = "FraudFound_P"
 REQUIRED_COLUMNS = CORE_NUMERIC_FEATURE_COLS + [
     LABEL_COL,
@@ -51,11 +21,6 @@ REQUIRED_COLUMNS = CORE_NUMERIC_FEATURE_COLS + [
     "expected_recovery",
     "investigation_cost",
 ]
-
-
-def _feature_cols_for(df: pd.DataFrame) -> list[str]:
-    """업로드된 데이터에 실제로 있는 컬럼만 골라 사용 (옛 5피처 스키마와 호환)."""
-    return CORE_NUMERIC_FEATURE_COLS + [c for c in OPTIONAL_CATEGORICAL_FEATURE_COLS if c in df.columns]
 
 st.set_page_config(page_title="클레임레이더", page_icon="🔍", layout="wide")
 
@@ -120,15 +85,21 @@ def _coverage_pct(df: pd.DataFrame, high_risk_ids: set) -> float:
     return 100 * covered / len(high_risk_ids)
 
 
-# 24건 샘플 데이터(조사관 3명x10시간) 기준 lambda_sweep_24case.py 재현 결과로 정한 대표값.
-# 0~90,000 사이는 완만한 전환 구간, 90,000~450,000은 평평, 480,000부터 baseline과
-# 동일(고위험 커버리지 100%)로 수렴해 90,000을 "균형", 480,000을 "고위험 차단 우선"의
-# 대표값으로 삼았다. 실제 카드에 표시되는 숫자는 이 값이 아니라 현재 업로드된 데이터로
+# 24건 샘플 데이터(조사관 3명x10시간) 기준 lambda_sweep_24case.py 재실행(2026-08-30,
+# ML 백본 보강+실제 LLM 캐시 반영) 결과로 정한 대표값. 이 데이터는 4단계 계단을
+# 그린다: λ=0~42,800(순회수액 160,000/커버리지 50.0%) → 43,000~65,000(140,150/66.7%)
+# → 67,000~79,000(119,950/83.3%, λ=66,000 정확히 한 지점만 130,500으로 튀는 불안정한
+# 예외 있어 대표값에서 제외) → 80,000 이상(109,950/100.0%로 수렴, 500,000까지 평평함
+# 확인). "균형"은 순회수액이 회수액 우선(160,000)과 고위험 차단 우선(109,950)의 산술
+# 중간값(134,975)에 가장 가까운 2단계 전환 구간(140,150)에서 골라 세 프리셋의
+# 순회수액이 160,000/140,150/109,950으로 고르게 분포하도록 했다(3단계 83.3%
+# 구간을 쓰면 119,950으로 고위험 차단 우선과 거의 붙어 "균형"이라는 이름과
+# 어긋난다). 실제 카드에 표시되는 숫자는 이 값이 아니라 현재 업로드된 데이터로
 # 매번 다시 계산한 값이다 (아래 _compute_policy_previews).
 POLICY_PRESETS = {
     "회수액 우선": 0,
-    "균형": 90_000,
-    "고위험 차단 우선": 480_000,
+    "균형": 50_000,
+    "고위험 차단 우선": 80_000,
 }
 POLICY_DESCRIPTIONS = {
     "회수액 우선": "순회수액을 최대화합니다. 고위험 건이라도 기대회수액이 낮으면 배정에서 밀릴 수 있습니다.",
@@ -155,8 +126,15 @@ def _compute_policy_previews(
     return previews
 
 
+# λ=0~42,800은 baseline과 완전히 동일한 결과(순회수액 160,000/커버리지 50.0%)라
+# 아직 "전환"이 시작되지 않은 회수액 우선 구간이다. 43,000부터 실제로 결과가
+# 바뀌기 시작해(scripts/lambda_sweep_24case.py 참고) 80,000(고위험 차단 우선
+# 프리셋, 커버리지 100% 수렴)까지가 균형(전환) 구간이다.
+_RECOVERY_PLATEAU_END = 43_000
+
+
 def _lambda_regime(risk_weight: int) -> str:
-    if risk_weight <= 0:
+    if risk_weight < _RECOVERY_PLATEAU_END:
         return "회수액 우선 구간"
     if risk_weight < POLICY_PRESETS["고위험 차단 우선"]:
         return "균형(전환) 구간"
@@ -194,7 +172,7 @@ elif st.button("스코어링 실행"):
     else:
         df = st.session_state.claims_df.copy()
         try:
-            feature_cols = _feature_cols_for(df)
+            feature_cols = feature_cols_for(df)
             with st.spinner("ML 모델 학습 중..."):
                 model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
                 ml_score = predict_fraud_score(model, df[feature_cols])
@@ -281,15 +259,17 @@ with st.expander("🔧 고급 설정: λ 직접 조정"):
     st.slider(
         "위험도 가중치 (λ)",
         min_value=0,
-        max_value=500_000,
+        max_value=150_000,
         step=1000,
         key="risk_weight_slider",
         help="목적함수 = 기대회수액 - 조사비용 + λ × 위험도스코어 × 배정여부. "
-        "λ=0이면 기존 방식(회수액 극대화)과 동일합니다. 데모 데이터 기준 λ가 "
-        "충분히 크면(수십만 단위) 회수액을 포기하는 대신 고위험 건 커버리지가 "
-        "baseline 수준까지 올라갑니다 — 낮은 λ(수만 단위 이하)에서는 거의 "
-        "변화가 없을 수 있습니다. 위 프리셋 값과 다르게 조정하면 세 정책 카드 "
-        "중 어느 것도 선택됨(✅) 표시가 없는 상태가 됩니다.",
+        "λ=0이면 기존 방식(회수액 극대화)과 동일합니다. 데모 데이터 기준 λ=43,000부터 "
+        "회수액을 포기하는 대신 고위험 건 커버리지가 올라가기 시작해 λ=80,000에서 "
+        "baseline 수준(100%)까지 도달합니다 — 그 이하(수만 단위 미만)에서는 거의 "
+        "변화가 없을 수 있습니다. 상한(150,000)을 넘겨도 결과는 80,000과 동일하게 "
+        "평평합니다(0~500,000 전체 스윕으로 확인됨 — scripts/lambda_sweep_24case.py). "
+        "위 프리셋 값과 다르게 조정하면 세 정책 카드 중 어느 것도 선택됨(✅) 표시가 "
+        "없는 상태가 됩니다.",
     )
     st.caption(
         f"현재 λ={st.session_state.risk_weight_slider:,} → "
