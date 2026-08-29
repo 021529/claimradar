@@ -2,6 +2,7 @@ streamlit>=1.38
 pandas>=2.2
 numpy>=1.26
 scikit-learn>=1.5
+imbalanced-learn>=0.12  # scripts/ml_model_comparison.py의 SMOTE 비교 실험 재현용 (프로덕션 ml_model.py는 미사용)
 ortools>=9.10
 anthropic>=1.0.0
 python-dotenv>=1.0

@@ -4,11 +4,16 @@ Kaggle "Vehicle Insurance Claim Fraud Detection"에는 case_id/expected_hours/
 expected_recovery/investigation_cost 같은 업무 수치가 없고, VehiclePrice/
 PastNumberOfClaims 등 일부 피처가 구간 문자열(범주형)이다. 이 스크립트는:
 
-1. 범주형 구간을 중간값 기준 수치로 변환 (vehicle_price, past_number_of_claims)
-2. 조사 업무 수치(expected_hours/expected_recovery/investigation_cost)를
+1. 범주형 구간을 중간값/순서 랭크 기준 수치로 변환 (vehicle_price,
+   past_number_of_claims, *_rank 컬럼들 — ORDINAL_ORDER 참고)
+2. 명목형 범주(Make/Sex/Fault/PolicyType/... — NOMINAL_COLS 참고)는 원본
+   문자열 그대로 전달해 ml_model.py가 One-Hot 인코딩하도록 함 (심사 지적:
+   범주형 피처 누락 → scripts/ml_model_comparison_results.md에서 보강 효과
+   정량 검증, AUC-ROC 0.53→0.83)
+3. 조사 업무 수치(expected_hours/expected_recovery/investigation_cost)를
    관측 가능한 피처 기반의 투명한 공식으로 산출 (Kaggle 원본에 없는 값이므로
    시연용 가정 — FraudFound_P 라벨은 사용하지 않아 정답 라벨 누출 없음)
-3. 사기 전체 + 정상 표본을 층화 추출 (기본: 실제 LLM 생성 사고경위서를 가진
+4. 사기 전체 + 정상 표본을 층화 추출 (기본: 실제 LLM 생성 사고경위서를 가진
    행 중에서만 뽑아 템플릿 문장이 섞이지 않도록 함)
 
 사용법:
@@ -36,6 +41,46 @@ _VEHICLE_PRICE_MIDPOINT = {
 }
 _PAST_CLAIMS_MIDPOINT = {"none": 0, "1": 1, "2 to 4": 3, "more than 4": 5}
 
+# 서열형(구간에 순서가 있는) 범주형 -> 순서 보존 정수 랭크. ML 스코어링 모델
+# 보강 실험(scripts/ml_model_comparison.py, scripts/ml_model_comparison_results.md
+# 참고 — AUC-ROC 0.53→0.83, PR-AUC 0.07→0.22)에서 검증된 것과 동일한 순서를 쓴다.
+ORDINAL_ORDER: dict[str, list[str]] = {
+    "AgeOfVehicle": [
+        "new", "2 years", "3 years", "4 years", "5 years", "6 years", "7 years", "more than 7",
+    ],
+    "AgeOfPolicyHolder": [
+        "16 to 17", "18 to 20", "21 to 25", "26 to 30", "31 to 35",
+        "36 to 40", "41 to 50", "51 to 65", "over 65",
+    ],
+    "Days_Policy_Accident": ["none", "1 to 7", "8 to 15", "15 to 30", "more than 30"],
+    "Days_Policy_Claim": ["none", "8 to 15", "15 to 30", "more than 30"],
+    "NumberOfSuppliments": ["none", "1 to 2", "3 to 5", "more than 5"],
+    "AddressChange_Claim": ["no change", "under 6 months", "1 year", "2 to 3 years", "4 to 8 years"],
+    "NumberOfCars": ["1 vehicle", "2 vehicles", "3 to 4", "5 to 8", "more than 8"],
+}
+
+_ORDINAL_RANK_COL_NAMES: dict[str, str] = {
+    "AgeOfVehicle": "age_of_vehicle_rank",
+    "AgeOfPolicyHolder": "age_of_policyholder_rank",
+    "Days_Policy_Accident": "days_policy_accident_rank",
+    "Days_Policy_Claim": "days_policy_claim_rank",
+    "NumberOfSuppliments": "number_of_suppliments_rank",
+    "AddressChange_Claim": "address_change_claim_rank",
+    "NumberOfCars": "number_of_cars_rank",
+}
+
+# 순서 없는 명목형 범주 컬럼. ml_model.py의 train_fraud_model이 dtype으로
+# 수치형/범주형을 자동 구분해 One-Hot 인코딩하므로 원본 Kaggle 값을 그대로 둔다.
+# 시간성 컬럼(Month/DayOfWeek/DayOfWeekClaimed/MonthClaimed)과 RepNumber(설계사
+# 코드)는 벤치마크 전체 피처셋에는 포함했지만(scripts/ml_model_comparison.py의
+# ENHANCED_FEATURE_COLS) 조사관 UI에 노출할 실익이 낮아 라이브 스키마에서는
+# 제외 — 이 "해석 가능 부분집합"으로도 성능이 유지되는지
+# scripts/ml_model_comparison.py의 interpretable_subset 실험으로 별도 검증함.
+NOMINAL_COLS = [
+    "Make", "Sex", "MaritalStatus", "Fault", "PolicyType", "VehicleCategory",
+    "AccidentArea", "PoliceReportFiled", "WitnessPresent", "AgentType", "BasePolicy",
+]
+
 
 def _llm_generated_mask(df: pd.DataFrame) -> pd.Series:
     """narrative_text가 템플릿 폴백이 아니라 실제 LLM 생성인 행만 표시."""
@@ -53,6 +98,16 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
     out["deductible"] = df["Deductible"]
     out["driver_rating"] = df["DriverRating"]
     out["past_number_of_claims"] = df["PastNumberOfClaims"].map(_PAST_CLAIMS_MIDPOINT)
+
+    # 서열형 범주 -> 순서 보존 정수 랭크 (ml_model.py가 수치형으로 자동 인식해
+    # One-Hot 없이 그대로 사용)
+    for col, order in ORDINAL_ORDER.items():
+        rank_map = {value: rank for rank, value in enumerate(order)}
+        out[_ORDINAL_RANK_COL_NAMES[col]] = df[col].map(rank_map)
+
+    # 명목형 범주는 원본 문자열 그대로 전달 (ml_model.py가 dtype으로 감지해 One-Hot)
+    for col in NOMINAL_COLS:
+        out[col] = df[col]
 
     # 조사 시간: 기본 2시간 + 관측 가능한 복잡도 신호마다 +1시간 (최대 8시간)
     complexity = (

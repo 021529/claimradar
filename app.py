@@ -11,15 +11,39 @@ from src.scoring.combine import combine_scores
 from src.scoring.llm_analysis import analyze_narrative
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model
 
-NUMERIC_FEATURE_COLS = [
+CORE_NUMERIC_FEATURE_COLS = [
     "driver_age",
     "vehicle_price",
     "deductible",
     "driver_rating",
     "past_number_of_claims",
 ]
+# 범주형 피처 보강(scripts/ml_model_comparison_results.md에서 AUC-ROC 0.53→0.80,
+# PR-AUC 0.07→0.17로 검증됨). scripts/prepare_app_dataset.py가 만드는 컬럼과
+# 정확히 일치해야 한다. CSV 업로드 등 옛 5피처 스키마와도 호환되도록 "존재하는
+# 것만" 쓰는 선택적 목록으로 둔다 — 없어도 스코어링은 CORE_NUMERIC_FEATURE_COLS만으로 동작한다.
+OPTIONAL_CATEGORICAL_FEATURE_COLS = [
+    "age_of_vehicle_rank",
+    "age_of_policyholder_rank",
+    "days_policy_accident_rank",
+    "days_policy_claim_rank",
+    "number_of_suppliments_rank",
+    "address_change_claim_rank",
+    "number_of_cars_rank",
+    "Make",
+    "Sex",
+    "MaritalStatus",
+    "Fault",
+    "PolicyType",
+    "VehicleCategory",
+    "AccidentArea",
+    "PoliceReportFiled",
+    "WitnessPresent",
+    "AgentType",
+    "BasePolicy",
+]
 LABEL_COL = "FraudFound_P"
-REQUIRED_COLUMNS = NUMERIC_FEATURE_COLS + [
+REQUIRED_COLUMNS = CORE_NUMERIC_FEATURE_COLS + [
     LABEL_COL,
     "case_id",
     "narrative_text",
@@ -27,6 +51,11 @@ REQUIRED_COLUMNS = NUMERIC_FEATURE_COLS + [
     "expected_recovery",
     "investigation_cost",
 ]
+
+
+def _feature_cols_for(df: pd.DataFrame) -> list[str]:
+    """업로드된 데이터에 실제로 있는 컬럼만 골라 사용 (옛 5피처 스키마와 호환)."""
+    return CORE_NUMERIC_FEATURE_COLS + [c for c in OPTIONAL_CATEGORICAL_FEATURE_COLS if c in df.columns]
 
 st.set_page_config(page_title="클레임레이더", page_icon="🔍", layout="wide")
 
@@ -37,6 +66,7 @@ for key in [
     "claims_df",
     "scored_df",
     "model",
+    "feature_cols",
     "baseline_result",
     "optimized_result",
 ]:
@@ -48,17 +78,26 @@ def _validate_columns(df: pd.DataFrame) -> list[str]:
     return [c for c in REQUIRED_COLUMNS if c not in df.columns]
 
 
-def _feature_evidence_table(model, row: pd.Series, all_cases: pd.DataFrame) -> pd.DataFrame:
-    """RandomForest 전역 피처 중요도 + 이 사건의 피처 값 대 전체 평균 비교표."""
-    means = all_cases[NUMERIC_FEATURE_COLS].mean()
-    table = pd.DataFrame(
+def _feature_evidence_table(row: pd.Series, all_cases: pd.DataFrame, numeric_feature_cols: list[str]) -> pd.DataFrame:
+    """이 사건의 수치형 피처 값 대 전체 평균 비교표."""
+    means = all_cases[numeric_feature_cols].mean()
+    return pd.DataFrame(
         {
-            "피처": NUMERIC_FEATURE_COLS,
-            "이 사건 값": [row.get(c) for c in NUMERIC_FEATURE_COLS],
+            "피처": numeric_feature_cols,
+            "이 사건 값": [row.get(c) for c in numeric_feature_cols],
             "전체 평균": means.round(1).values,
-            "모델 중요도": (model.feature_importances_ * 100).round(1),
         }
-    ).sort_values("모델 중요도", ascending=False)
+    )
+
+
+def _top_feature_importance_table(model, top_n: int = 10) -> pd.DataFrame:
+    """모델(전처리+RandomForest 파이프라인) 상위 피처 중요도 (범주형은 One-Hot 항목별)."""
+    prep = model.named_steps["prep"]
+    clf = model.named_steps["clf"]
+    names = [n.split("__", 1)[-1] for n in prep.get_feature_names_out()]
+    importances = clf.feature_importances_
+    table = pd.DataFrame({"피처": names, "모델 중요도": (importances * 100).round(1)})
+    table = table.sort_values("모델 중요도", ascending=False).head(top_n)
     table["모델 중요도"] = table["모델 중요도"].astype(str) + "%"
     return table
 
@@ -155,9 +194,10 @@ elif st.button("스코어링 실행"):
     else:
         df = st.session_state.claims_df.copy()
         try:
+            feature_cols = _feature_cols_for(df)
             with st.spinner("ML 모델 학습 중..."):
-                model, _ = train_fraud_model(df[NUMERIC_FEATURE_COLS + [LABEL_COL]])
-                ml_score = predict_fraud_score(model, df[NUMERIC_FEATURE_COLS])
+                model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
+                ml_score = predict_fraud_score(model, df[feature_cols])
 
             if "llm_suspicion_adjustment" in df.columns:
                 st.info("사전 계산된 LLM 분석 결과를 재사용합니다 (추가 API 호출 없음).")
@@ -184,6 +224,7 @@ elif st.button("스코어링 실행"):
             df["llm_suspicion_adjustment"] = llm_adjustment
             df["combined_score"] = combine_scores(ml_score, llm_adjustment)
             st.session_state.model = model
+            st.session_state.feature_cols = feature_cols
             st.session_state.scored_df = df.sort_values("combined_score", ascending=False)
         except Exception as e:
             st.error(f"스코어링 중 오류가 발생했습니다: {e}")
@@ -384,8 +425,15 @@ else:
             else:
                 st.markdown(f"**결합 스코어 {row['combined_score']:.2f}**")
             if st.session_state.model is not None:
+                st.caption("이 사건 값 vs 전체 평균 (수치형 피처)")
                 st.dataframe(
-                    _feature_evidence_table(st.session_state.model, row, st.session_state.scored_df),
+                    _feature_evidence_table(row, st.session_state.scored_df, CORE_NUMERIC_FEATURE_COLS),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.caption("모델 상위 피처 중요도 (범주형은 One-Hot 항목별)")
+                st.dataframe(
+                    _top_feature_importance_table(st.session_state.model),
                     use_container_width=True,
                     hide_index=True,
                 )

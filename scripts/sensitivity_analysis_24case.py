@@ -51,10 +51,13 @@ COST_PER_HOURS = [245.0, 297.5, 350.0, 402.5, 455.0]
 
 def _load_base_data() -> pd.DataFrame:
     sample = pd.read_csv(SAMPLE_PATH)
-    raw = pd.read_csv(RAW_PATH)[
-        ["PolicyNumber", "PastNumberOfClaims", "PoliceReportFiled", "WitnessPresent", "NumberOfSuppliments"]
-    ]
-    merged = sample.merge(raw, left_on="case_id", right_on="PolicyNumber", how="left")
+    # ML 스코어링 모델 보강(scripts/prepare_app_dataset.py)으로 sample_claims.csv가
+    # 이제 PoliceReportFiled/WitnessPresent를 자체적으로 갖고 있다 — 그대로 다시
+    # 병합하면 컬럼명이 충돌해 _x/_y로 접미사가 붙으므로, 아직 없는 컬럼만 병합한다.
+    needed = ["PastNumberOfClaims", "PoliceReportFiled", "WitnessPresent", "NumberOfSuppliments"]
+    to_merge = [c for c in needed if c not in sample.columns]
+    raw = pd.read_csv(RAW_PATH)[["PolicyNumber", *to_merge]]
+    merged = sample.merge(raw, left_on="case_id", right_on="PolicyNumber", how="left") if to_merge else sample
     assert merged["PastNumberOfClaims"].isna().sum() == 0, "case_id-PolicyNumber 조인 실패 건 존재"
     return merged
 
