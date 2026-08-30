@@ -363,6 +363,22 @@ def build_report(results: list[dict]) -> str:
                 f"- n={res['n']}, 사기 비율={res['prevalence']:.2f} "
                 + ("(주의: 24건은 표본이 작아 K=1%/5%가 K=1건으로 겹치는 등 노이즈가 큼)" if res["n"] < 100 else ""),
                 "",
+            ]
+            + (
+                [
+                    "> **ML only AUC가 낮게(0.29) 나오는 이유**: 5-fold OOF는 fold당 학습 데이터가 "
+                    "~19건뿐이라 추정 자체가 극도로 불안정하다(scripts/small_sample_cv_diagnosis.py로 "
+                    "검증: 같은 24건을 5-fold 분할만 다르게 30회 반복해도 AUC 0.31~0.67로 흔들림, "
+                    "평균 0.45). 전체 인구 15,396건(이 24건 제외)으로 제대로 학습한 모델은 이 정확한 "
+                    "24건에서 AUC=0.74로 population 기준치(0.80)와 같은 범위다 — **표본 크기가 원인이지, "
+                    "이 24건 자체가 모델이 못 맞히는 구성이거나 앱의 ML 점수가 무작위보다 못한 게 아니다.** "
+                    "자세한 내용: `scripts/small_sample_cv_diagnosis_results.md`.",
+                    "",
+                ]
+                if res["n"] < 100
+                else []
+            )
+            + [
                 "### 실험 1 — Ablation 비교",
                 "",
                 "| 변형 | AUC-ROC | PR-AUC | P@10% | R@10% | Lift@10% | 캐파(N건 중 P/R) |",
