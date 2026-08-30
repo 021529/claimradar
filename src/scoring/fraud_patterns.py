@@ -114,3 +114,52 @@ def select_patterns(row: Mapping[str, Any], seed_key: Any = None) -> list[str]:
         triggered = rng.sample(list(KOREAN_FRAUD_PATTERNS), k=rng.randint(1, 2))
 
     return triggered[:_MAX_PATTERNS]
+
+
+def select_patterns_structural(row: Mapping[str, Any], seed_key: Any = None) -> list[str]:
+    """select_patterns()의 라벨 누출 없는 버전 — 감사(scripts/llm_contribution_test.py의
+    check_label_leakage)에서 select_patterns()가 `if not _is_fraud(row): return []`
+    때문에 사기 건에만 100% 결정론적으로 정황을 주입한다는 게 확인돼, 이 함수는 그
+    게이트와 사기 전용 랜덤 폴백을 모두 제거하고 순수 구조적 조건(관측 가능한
+    실제 위험 신호)만으로 동일한 4개 패턴을 판단한다. FraudFound_P는 전혀 보지
+    않는다 — 그래서 사기가 아닌 건도 구조적 조건을 만족하면 정황이 붙고, 사기
+    건이라도 조건을 안 만족하면 정황이 안 붙을 수 있다.
+
+    seed_key는 인터페이스를 select_patterns()와 맞추기 위해 남겨뒀을 뿐 이
+    함수 안에서는 쓰이지 않는다(라벨 무관 폴백 자체가 없어 난수가 필요 없음).
+    별도 함수로 분리해 select_patterns()는 손대지 않았다 — 기존 파이프라인
+    (data/sample/sample_claims.csv, data/processed/app_demo_sample.csv와
+    그걸 쓰는 스크립트들)은 이 함수와 무관하게 그대로 재현된다.
+    """
+    triggered: list[str] = []
+
+    days_claim = _get(row, "Days_Policy_Claim")
+    days_accident = _get(row, "Days_Policy_Accident")
+    if days_claim in _DELAYED_BINS or days_accident in _DELAYED_BINS:
+        triggered.append("jiyeon_singo")
+
+    police_report = _get(row, "PoliceReportFiled")
+    witness = _get(row, "WitnessPresent")
+    if police_report == "No" and witness == "No":
+        triggered.append("blackbox_mijangchak")
+
+    past_claims = _get(row, "PastNumberOfClaims", "past_number_of_claims")
+    supplements = _get(row, "NumberOfSuppliments")
+    high_past_claims = past_claims in _HIGH_PAST_CLAIMS or (
+        isinstance(past_claims, (int, float)) and past_claims >= 2
+    )
+    if high_past_claims or supplements in _HIGH_SUPPLEMENTS:
+        triggered.append("naeilong_hwanja")
+
+    if "naeilong_hwanja" in triggered:
+        base_policy = _get(row, "BasePolicy")
+        vehicle_price = _get(row, "VehiclePrice", "vehicle_price")
+        if isinstance(vehicle_price, (int, float)):
+            cheap_vehicle = vehicle_price < 15000
+        else:
+            cheap_vehicle = vehicle_price in {"less than 20000", "20000 to 29000"}
+        if base_policy == "All Perils" or cheap_vehicle:
+            triggered.append("hanbang_jangi_ipwon")
+
+    triggered = list(dict.fromkeys(triggered))
+    return triggered[:_MAX_PATTERNS]

@@ -226,7 +226,9 @@ def _template_narrative(row: Mapping[str, Any], patterns: list[str]) -> str:
     return " ".join(sentences)
 
 
-def generate_synthetic_narrative(claim_row, style_reference_text: str = "") -> str:
+def generate_synthetic_narrative(
+    claim_row, style_reference_text: str = "", patterns_override: list[str] | None = None
+) -> str:
     """Kaggle 정형 라벨 + 국내 특유 사기패턴을 결합해 한글 합성 사고경위서를 생성.
 
     FraudFound_P == 1 인 레코드는 나이롱환자/한방병원 장기입원/지연신고/블랙박스
@@ -235,8 +237,13 @@ def generate_synthetic_narrative(claim_row, style_reference_text: str = "") -> s
 
     style_reference_text가 주어지면(NHTSA NMVCCS 등 실제 사고경위서 원문) 문체·구조
     참고용 few-shot으로 프롬프트에 포함하되, 언어와 내용은 완전히 새로 생성한다.
+
+    patterns_override가 주어지면 select_patterns() 대신 그 리스트를 그대로 쓴다 —
+    scripts/leak_free_contribution_test.py가 라벨 누출 없는 select_patterns_structural()
+    결과를 주입하는 데 쓴다. 기본값 None이면 기존과 완전히 동일하게 동작해 기존
+    호출부(scripts/generate_synthetic_dataset.py 등)는 영향받지 않는다.
     """
-    patterns = select_patterns(claim_row, seed_key=_seed_key(claim_row))
+    patterns = patterns_override if patterns_override is not None else select_patterns(claim_row, seed_key=_seed_key(claim_row))
 
     if not ANTHROPIC_API_KEY:
         return _template_narrative(claim_row, patterns)
