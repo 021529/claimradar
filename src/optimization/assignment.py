@@ -24,10 +24,13 @@ def optimize_assignment(
     if solver is None:
         raise RuntimeError("OR-Tools CBC solver 를 생성할 수 없습니다.")
 
-    # 실측 결과 CBC는 200ms 이내에 사실상 최적에 가까운 해를 찾고, 남은 시간은
-    # 그 해가 "진짜 최적"임을 증명하는 데만 소모한다(조사관 5명 기준 200ms 해와
-    # 10초 해의 목적함수 차이는 0.05% 수준). 대칭성 제거 제약을 추가해봐도 증명
-    # 시간은 줄지 않았으므로, 증명을 포기하고 빠른 feasible 해로 응답 속도를 확보한다.
+    # 실측(scripts/solver_gap_check.py, 2026-08-30 ML 백본 기준) 결과 24건 앱
+    # 데모 규모는 조사관 수·λ와 무관하게 200ms 안에 항상 OPTIMAL(격차 0%)이다.
+    # 300건 이상·조사관 5명 이상에서는 1.5초로도 최적성이 증명 안 된 FEASIBLE로
+    # 끝나는 경우가 있고, 그 시점 목적함수 값은 200ms 해 대비 최대 약 8% 더
+    # 크다(즉 200ms는 이 규모에서 부족하지만, 1.5초 해도 "진짜 최적"이라고
+    # 단정할 수는 없다 — scripts/solver_gap_check_results.md 참고). 그래도 응답
+    # 속도를 위해 1.5초를 유지한다.
     solver.SetTimeLimit(1_500)
 
     cases = cases_df.reset_index(drop=True)
