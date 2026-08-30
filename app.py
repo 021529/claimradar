@@ -599,17 +599,48 @@ if st.session_state.optimized_result is not None:
             f"고위험 커버리지 {coverage_delta:+.1f}%p 입니다."
         )
 
-    chart_df = pd.DataFrame(
-        {"방식": ["Baseline", "최적화"], "순회수액": [baseline_net, optimized_net]}
-    )
-    st.plotly_chart(px.bar(chart_df, x="방식", y="순회수액"), use_container_width=True)
+    # Baseline=회색(중립)/최적화=강조색으로 "어느 쪽이 우리 방식인지"를 구분한다.
+    # 이 매핑은 방식(누구)에 대한 색이지 값의 좋고 나쁨에 대한 색이 아니므로, 두
+    # 차트 모두 동일하게 적용한다 — 커버리지가 baseline보다 낮게 나와도(정책상
+    # 자연스러운 트레이드오프이지 오류가 아님) 최적화 막대를 부정적 색으로
+    # 바꾸지 않는다.
+    METHOD_COLORS = {"Baseline": "#9CA3AF", "최적화": "#2563EB"}
 
-    coverage_chart_df = pd.DataFrame(
-        {"방식": ["Baseline", "최적화"], "고위험 커버리지(%)": [baseline_coverage, optimized_coverage]}
-    )
-    st.plotly_chart(
-        px.bar(coverage_chart_df, x="방식", y="고위험 커버리지(%)"), use_container_width=True
-    )
+    chart_col1, chart_col2 = st.columns(2)
+
+    with chart_col1:
+        chart_df = pd.DataFrame(
+            {"방식": ["Baseline", "최적화"], "순회수액": [baseline_net, optimized_net]}
+        )
+        fig_net = px.bar(
+            chart_df,
+            x="방식",
+            y="순회수액",
+            color="방식",
+            color_discrete_map=METHOD_COLORS,
+            text="순회수액",
+            title="순회수액 비교",
+        )
+        fig_net.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+        fig_net.update_layout(showlegend=False, yaxis_title="순회수액 (원)")
+        st.plotly_chart(fig_net, use_container_width=True)
+
+    with chart_col2:
+        coverage_chart_df = pd.DataFrame(
+            {"방식": ["Baseline", "최적화"], "고위험 커버리지": [baseline_coverage, optimized_coverage]}
+        )
+        fig_cov = px.bar(
+            coverage_chart_df,
+            x="방식",
+            y="고위험 커버리지",
+            color="방식",
+            color_discrete_map=METHOD_COLORS,
+            text="고위험 커버리지",
+            title="고위험 커버리지 비교",
+        )
+        fig_cov.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig_cov.update_layout(showlegend=False, yaxis_title="고위험 커버리지 (%)", yaxis_range=[0, 100])
+        st.plotly_chart(fig_cov, use_container_width=True)
 
     st.subheader("조사관별 담당 사건")
     for inv in sorted(optimized["assigned_investigator"].dropna().unique()):
