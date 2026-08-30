@@ -37,6 +37,7 @@ for key in [
 ]:
     st.session_state.setdefault(key, None)
 st.session_state.setdefault("guide_checklists", {})
+st.session_state.setdefault("guide_feedback_log", [])
 
 
 def _validate_columns(df: pd.DataFrame) -> list[str]:
@@ -453,3 +454,24 @@ else:
                 st.checkbox(item, key=f"guide_{selected_case}_{i}")
         else:
             st.caption("이 사건에 대한 조사 가이드가 아직 생성되지 않았습니다.")
+
+        st.divider()
+        st.subheader("AI 판단 피드백 (Human-in-the-loop)")
+        st.caption(
+            "AI 판단(스코어링·조사 가이드)에 오류(오탐)가 있다고 판단되면 피드백을 남겨주세요. "
+            "최종 조사 여부 판단 권한은 조사관에게 있으며, AI 판단은 참고용입니다."
+        )
+        fb_col1, fb_col2 = st.columns(2)
+        if fb_col1.button("동의 — 조사 필요성이 인정됨", key=f"fb_agree_{selected_case}"):
+            st.session_state.guide_feedback_log.append({"case_id": selected_case, "decision": "agree"})
+            st.toast(f"'{selected_case}' 사건 피드백(동의)이 접수되었습니다.")
+        if fb_col2.button("비동의 — 오탐으로 판단됨", key=f"fb_disagree_{selected_case}"):
+            st.session_state.guide_feedback_log.append({"case_id": selected_case, "decision": "disagree"})
+            st.toast(f"'{selected_case}' 사건 피드백(비동의)이 접수되었습니다.")
+
+        agree_count = sum(1 for f in st.session_state.guide_feedback_log if f["decision"] == "agree")
+        disagree_count = sum(1 for f in st.session_state.guide_feedback_log if f["decision"] == "disagree")
+        st.markdown(f"**이번 세션 피드백: 동의 {agree_count}건 / 비동의 {disagree_count}건**")
+        st.caption(
+            "MVP에서는 세션 단위로만 집계되며, 실 도입 시 조사 이력 DB에 축적되어 모델 재학습에 활용됩니다."
+        )
