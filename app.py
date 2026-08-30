@@ -2,7 +2,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from src.config import SCORE_WEIGHT_LLM, SCORE_WEIGHT_ML
+from src.config import MAX_UPLOAD_ROWS, SCORE_WEIGHT_LLM, SCORE_WEIGHT_ML
 from src.data.loader import load_sample_claims, load_uploaded_claims, normalize_columns
 from src.guide.guide_generator import generate_investigation_checklist
 from src.optimization.assignment import optimize_assignment
@@ -118,16 +118,35 @@ HIERARCHICAL_FILTERING_PREVIEW_HOURS = 10
 HIERARCHICAL_FILTERING_PREVIEW_RISK_WEIGHT = POLICY_PRESETS["균형"]
 
 
+# analyze_narrative 프롬프트 구조(고정 지시문 + 사고경위서 본문 평균 270자 + 도구 스키마)
+# 기준 대략적 추정치 — 실측이 아니라 프롬프트 길이 기반 추정이므로 범위로 제시한다.
+# 실제 요금 상수는 scripts/hierarchical_filtering.py의 Sonnet 5 가격과 동일.
+LLM_CALL_EST_INPUT_TOKENS = (450, 700)
+LLM_CALL_EST_OUTPUT_TOKENS = (80, 180)
+SONNET_5_INPUT_PRICE_PER_M = 2.00
+SONNET_5_OUTPUT_PRICE_PER_M = 10.00
+
+
+def _estimate_llm_cost_usd(n_calls: int) -> tuple[float, float]:
+    """n_calls건에 대해 실제 API를 호출할 경우의 대략적 비용 범위(추정치, USD)."""
+    low = n_calls * (
+        LLM_CALL_EST_INPUT_TOKENS[0] / 1e6 * SONNET_5_INPUT_PRICE_PER_M
+        + LLM_CALL_EST_OUTPUT_TOKENS[0] / 1e6 * SONNET_5_OUTPUT_PRICE_PER_M
+    )
+    high = n_calls * (
+        LLM_CALL_EST_INPUT_TOKENS[1] / 1e6 * SONNET_5_INPUT_PRICE_PER_M
+        + LLM_CALL_EST_OUTPUT_TOKENS[1] / 1e6 * SONNET_5_OUTPUT_PRICE_PER_M
+    )
+    return low, high
+
+
 @st.cache_data(show_spinner=False)
-def _hierarchical_filtering_preview(
-    claims_df: pd.DataFrame, mask_kind: str, mask_value: float
-) -> dict | None:
-    """캐시된 LLM 분석이 이미 있는 데이터에 한해, 필터링 적용 시 실제로 관측되는 순회수액/
-    고위험 커버리지 변화를 균형 프리셋(λ=50,000)·조사관 3명×10시간 기준으로 실측한다.
-    캐시가 없는 데이터는 스킵될 행의 LLM 결과를 미리 알 수 없어(=API를 안 부르고는
-    시뮬레이션 자체가 불가능해) None을 반환한다."""
-    if "llm_suspicion_adjustment" not in claims_df.columns:
-        return None
+def _hierarchical_filtering_preview(claims_df: pd.DataFrame, mask_kind: str, mask_value: float) -> dict:
+    """필터링 적용 시 실제로 LLM 호출될 건수를 계산한다. 데이터에 LLM 분석 캐시가 이미
+    있으면(=샘플 데이터) 균형 프리셋(λ=50,000)·조사관 3명×10시간 기준 순회수액/고위험
+    커버리지 변화까지 실측해 net_delta_pct/coverage_delta에 채운다. 캐시가 없는 데이터는
+    스킵될 행의 LLM 결과를 미리 알 수 없어(=API를 안 부르고는 손실 시뮬레이션 자체가
+    불가능해) 그 두 값을 None으로 둔다 — 이 경우에도 호출 건수/비용 추정은 가능하다."""
     df = claims_df.copy()
     feature_cols = feature_cols_for(df)
     model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
@@ -137,6 +156,18 @@ def _hierarchical_filtering_preview(
         if mask_kind == "top_pct"
         else select_mask_threshold(ml_score, mask_value)
     )
+    n_total = len(df)
+    n_selected = int(mask.sum())
+    result = {
+        "n_total": n_total,
+        "n_selected": n_selected,
+        "reduction_pct": 100 * (1 - n_selected / n_total) if n_total else 0.0,
+        "net_delta_pct": None,
+        "coverage_delta": None,
+    }
+
+    if "llm_suspicion_adjustment" not in df.columns:
+        return result
 
     def _build(selected_mask: pd.Series) -> pd.DataFrame:
         out = df.copy()
@@ -163,15 +194,9 @@ def _hierarchical_filtering_preview(
     full_net, filtered_net = _net_value(full_opt), _net_value(filtered_opt)
     full_cov = _coverage_pct(full_opt, high_risk_ids)
     filtered_cov = _coverage_pct(filtered_opt, high_risk_ids)
-    n_total = len(df)
-    n_selected = int(mask.sum())
-    return {
-        "n_total": n_total,
-        "n_selected": n_selected,
-        "reduction_pct": 100 * (1 - n_selected / n_total) if n_total else 0.0,
-        "net_delta_pct": (filtered_net - full_net) / full_net * 100 if full_net else 0.0,
-        "coverage_delta": filtered_cov - full_cov,
-    }
+    result["net_delta_pct"] = (filtered_net - full_net) / full_net * 100 if full_net else 0.0
+    result["coverage_delta"] = filtered_cov - full_cov
+    return result
 
 
 @st.cache_data(show_spinner="정책별 예상 결과 계산 중...")
@@ -217,7 +242,19 @@ else:
     uploaded = st.file_uploader("청구 데이터 CSV 업로드", type="csv")
     if uploaded is not None:
         try:
-            st.session_state.claims_df = normalize_columns(load_uploaded_claims(uploaded))
+            uploaded_df = normalize_columns(load_uploaded_claims(uploaded))
+            if len(uploaded_df) > MAX_UPLOAD_ROWS:
+                st.error(
+                    f"업로드한 CSV가 {len(uploaded_df)}건으로, 이 데모의 상한({MAX_UPLOAD_ROWS}건)을 "
+                    "초과합니다. 이는 버그가 아니라 MVP 데모 환경의 API 비용 통제를 위한 설계상 "
+                    "제한입니다 — 이 앱은 퍼블릭 URL로 배포되어 있어 상한이 없으면 대용량 CSV "
+                    "하나로 실제 Claude API 크레딧이 소진될 수 있습니다. 실 도입 시에는 계층적 "
+                    f"필터링(2.의 토글 참고)과 배치 처리로 대규모 데이터를 처리합니다. {MAX_UPLOAD_ROWS}건 "
+                    "이하로 잘라서 다시 업로드해 주세요."
+                )
+                st.session_state.claims_df = None
+            else:
+                st.session_state.claims_df = uploaded_df
         except Exception as e:
             st.error(f"CSV 파일을 읽지 못했습니다: {e}")
             st.session_state.claims_df = None
@@ -243,7 +280,7 @@ else:
     )
 
     filter_kind = "top_pct"
-    filter_value = 0.5
+    filter_value = 1.0  # 필터링을 끄면 전체 호출과 동일 — 아래 preview 계산에 그대로 재사용
     if use_filtering:
         filter_kind_label = st.radio(
             "필터링 기준",
@@ -274,8 +311,15 @@ else:
                 key="filter_threshold_ui",
             )
 
+    try:
         preview = _hierarchical_filtering_preview(st.session_state.claims_df, filter_kind, filter_value)
-        if preview is not None:
+    except Exception:
+        preview = None
+
+    has_cache = preview is not None and preview["net_delta_pct"] is not None
+
+    if use_filtering and preview is not None:
+        if has_cache:
             net_delta = preview["net_delta_pct"]
             cov_delta = preview["coverage_delta"]
             base_msg = (
@@ -301,6 +345,15 @@ else:
                 "달라졌습니다(scripts/hierarchical_filtering_results.md 참고) — 이 데이터에 그대로 "
                 "적용되지는 않으니 참고만 하세요."
             )
+
+    if preview is not None and not has_cache:
+        cost_low, cost_high = _estimate_llm_cost_usd(preview["n_selected"])
+        st.warning(
+            f"⚠️ 이 데이터에는 LLM 분석 캐시가 없어 '스코어링 실행' 시 {preview['n_selected']}건에 대해 "
+            f"실제 Claude API 호출이 발생합니다. 예상 비용 약 ${cost_low:.2f}~${cost_high:.2f}"
+            "(프롬프트 길이 기반 추정치, 실측 아님). 업로드는 API 비용 통제를 위해 최대 "
+            f"{MAX_UPLOAD_ROWS}건으로 제한되어 있습니다."
+        )
 
     if st.button("스코어링 실행"):
         missing = _validate_columns(st.session_state.claims_df)

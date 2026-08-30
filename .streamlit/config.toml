@@ -4,3 +4,7 @@ base = "light"
 [server]
 enableCORS = false
 enableXsrfProtection = true
+# MAX_UPLOAD_ROWS(src/config.py, 100건) 방어의 2차 방어선. 샘플 데이터가 24건에
+# ~30KB(행당 ~1.3KB)이므로 100건은 ~130KB — 1MB면 충분한 여유를 두면서도
+# 대용량 CSV로 API 비용을 소진시키는 시도를 파일 크기 단계에서부터 차단한다.
+maxUploadSize = 1
