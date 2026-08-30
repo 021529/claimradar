@@ -19,6 +19,15 @@ def _build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     여기서는 dtype만 보면 된다 — 이 함수는 호출 측이 수치형만 넘기든
     (기존 5피처 스키마) 범주형까지 포함해 넘기든(보강된 스키마) 동일하게
     동작해 인터페이스 호환이 유지된다.
+
+    결측치: 별도 대치(imputation) 전략은 구현돼 있지 않다. 수치형은
+    "passthrough"라 결측이 그대로 RandomForest에 전달되며, sklearn(1.4+)의
+    트리 분할이 NaN을 자체적으로 처리해 학습은 되지만 이는 명시적으로
+    설계한 처리가 아니라 sklearn 기본 동작에 기대는 것이다. 범주형은
+    OneHotEncoder가 NaN을 별도 카테고리로 원-핫 인코딩한다. 번들 데이터셋
+    (data/sample/sample_claims.csv, data/processed/app_demo_sample.csv)에는
+    결측치가 전혀 없어 지금까지 문제가 된 적은 없지만, 결측이 있는 데이터를
+    업로드하면 이 암묵적 동작에 그대로 의존하게 된다.
     """
     numeric_cols = X.select_dtypes(include="number").columns.tolist()
     categorical_cols = [c for c in X.columns if c not in numeric_cols]

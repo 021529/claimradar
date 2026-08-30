@@ -20,8 +20,3 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
     return df
-
-
-def handle_missing_values(df: pd.DataFrame) -> pd.DataFrame:
-    """결측치 처리. TODO: 컬럼 타입별 처리 전략 확정."""
-    return df
