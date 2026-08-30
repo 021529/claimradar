@@ -9,6 +9,7 @@ from src.optimization.assignment import optimize_assignment
 from src.optimization.baseline import baseline_assignment
 from src.scoring.combine import combine_scores
 from src.scoring.features import CORE_NUMERIC_FEATURE_COLS, feature_cols_for
+from src.scoring.hierarchical_filtering import select_mask_threshold, select_mask_top_pct
 from src.scoring.llm_analysis import analyze_narrative
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model
 
@@ -109,6 +110,70 @@ POLICY_DESCRIPTIONS = {
 }
 
 
+# 계층적 필터링 미리보기용 고정 기준 — scripts/hierarchical_filtering.py 검증 조건과
+# 동일(조사관 3명×10시간, λ=50,000=균형 프리셋)으로 고정해 검증 문서 수치와 어긋나지
+# 않게 한다. 3.에서 사용자가 실제로 고른 조사관 수/λ와는 별개의 참고용 시뮬레이션이다.
+HIERARCHICAL_FILTERING_PREVIEW_INVESTIGATORS = 3
+HIERARCHICAL_FILTERING_PREVIEW_HOURS = 10
+HIERARCHICAL_FILTERING_PREVIEW_RISK_WEIGHT = POLICY_PRESETS["균형"]
+
+
+@st.cache_data(show_spinner=False)
+def _hierarchical_filtering_preview(
+    claims_df: pd.DataFrame, mask_kind: str, mask_value: float
+) -> dict | None:
+    """캐시된 LLM 분석이 이미 있는 데이터에 한해, 필터링 적용 시 실제로 관측되는 순회수액/
+    고위험 커버리지 변화를 균형 프리셋(λ=50,000)·조사관 3명×10시간 기준으로 실측한다.
+    캐시가 없는 데이터는 스킵될 행의 LLM 결과를 미리 알 수 없어(=API를 안 부르고는
+    시뮬레이션 자체가 불가능해) None을 반환한다."""
+    if "llm_suspicion_adjustment" not in claims_df.columns:
+        return None
+    df = claims_df.copy()
+    feature_cols = feature_cols_for(df)
+    model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
+    ml_score = predict_fraud_score(model, df[feature_cols])
+    mask = (
+        select_mask_top_pct(ml_score, mask_value)
+        if mask_kind == "top_pct"
+        else select_mask_threshold(ml_score, mask_value)
+    )
+
+    def _build(selected_mask: pd.Series) -> pd.DataFrame:
+        out = df.copy()
+        out["ml_score"] = ml_score
+        adjustment = out["llm_suspicion_adjustment"].where(selected_mask, 0.0)
+        out["combined_score"] = combine_scores(ml_score, adjustment)
+        return out
+
+    full = _build(pd.Series(True, index=df.index))
+    filtered = _build(mask)
+    high_risk_ids = _high_risk_ids(full)
+    full_opt = optimize_assignment(
+        full,
+        HIERARCHICAL_FILTERING_PREVIEW_INVESTIGATORS,
+        HIERARCHICAL_FILTERING_PREVIEW_HOURS,
+        risk_weight=HIERARCHICAL_FILTERING_PREVIEW_RISK_WEIGHT,
+    )
+    filtered_opt = optimize_assignment(
+        filtered,
+        HIERARCHICAL_FILTERING_PREVIEW_INVESTIGATORS,
+        HIERARCHICAL_FILTERING_PREVIEW_HOURS,
+        risk_weight=HIERARCHICAL_FILTERING_PREVIEW_RISK_WEIGHT,
+    )
+    full_net, filtered_net = _net_value(full_opt), _net_value(filtered_opt)
+    full_cov = _coverage_pct(full_opt, high_risk_ids)
+    filtered_cov = _coverage_pct(filtered_opt, high_risk_ids)
+    n_total = len(df)
+    n_selected = int(mask.sum())
+    return {
+        "n_total": n_total,
+        "n_selected": n_selected,
+        "reduction_pct": 100 * (1 - n_selected / n_total) if n_total else 0.0,
+        "net_delta_pct": (filtered_net - full_net) / full_net * 100 if full_net else 0.0,
+        "coverage_delta": filtered_cov - full_cov,
+    }
+
+
 @st.cache_data(show_spinner="정책별 예상 결과 계산 중...")
 def _compute_policy_previews(
     scored_df: pd.DataFrame, num_investigators: int, hours_per_investigator: int
@@ -166,60 +231,171 @@ if st.session_state.claims_df is not None:
 st.header("2. 이상거래 스코어링")
 if st.session_state.claims_df is None:
     st.info("먼저 청구 데이터를 불러오세요.")
-elif st.button("스코어링 실행"):
-    missing = _validate_columns(st.session_state.claims_df)
-    if missing:
-        st.error(f"필수 컬럼이 없어 스코어링을 실행할 수 없습니다: {', '.join(missing)}")
-    else:
-        df = st.session_state.claims_df.copy()
-        try:
-            feature_cols = feature_cols_for(df)
-            with st.spinner("ML 모델 학습 중..."):
-                model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
-                ml_score = predict_fraud_score(model, df[feature_cols])
+else:
+    use_filtering = st.toggle(
+        "계층적 필터링 사용 (ML 점수로 1차 선별 후 상위 건만 LLM 호출)",
+        value=False,
+        key="use_hierarchical_filtering",
+        help=(
+            "꺼두면 전체 건에 LLM 분석을 수행합니다(기본 데모 경로). 켜면 비용이 거의 0인 "
+            "ML 스코어링으로 먼저 거른 뒤, 선택된 건만 LLM을 호출해 API 비용을 절감합니다."
+        ),
+    )
 
-            if "llm_suspicion_adjustment" in df.columns:
-                st.info("사전 계산된 LLM 분석 결과를 재사용합니다 (추가 API 호출 없음).")
-                llm_adjustment = df["llm_suspicion_adjustment"]
-                # 캐시 CSV는 키워드를 "지연신고|블랙박스 미장착" 형태의 파이프 구분
-                # 문자열로 저장한다(scripts/hierarchical_filtering.py의
-                # get_or_build_llm_cache와 동일 포맷) — 리스트로 되돌려야 문자
-                # 단위가 아니라 키워드 단위로 join/순회된다.
-                llm_keywords = (
-                    df.get("llm_keywords", pd.Series("", index=df.index))
-                    .fillna("")
-                    .apply(lambda s: [k for k in s.split("|") if k] if isinstance(s, str) else [])
+    filter_kind = "top_pct"
+    filter_value = 0.5
+    if use_filtering:
+        filter_kind_label = st.radio(
+            "필터링 기준",
+            ["ML 점수 상위 N%", "ML 점수 절대 임계값"],
+            horizontal=True,
+            key="filter_kind_ui",
+        )
+        filter_kind = "top_pct" if filter_kind_label == "ML 점수 상위 N%" else "threshold"
+        if filter_kind == "top_pct":
+            filter_value = (
+                st.slider(
+                    "상위 몇 %만 LLM 호출",
+                    min_value=10,
+                    max_value=100,
+                    value=50,
+                    step=10,
+                    key="filter_top_pct_ui",
                 )
-                llm_explanation = df.get("llm_explanation", pd.Series("", index=df.index))
-            else:
-                llm_adjustment = pd.Series(0.0, index=df.index)
-                llm_keywords = pd.Series([[]] * len(df), index=df.index)
-                llm_explanation = pd.Series("", index=df.index)
-                with st.spinner("사고경위서 이상징후 분석 중..."):
-                    progress = st.progress(0.0)
-                    for i, (idx, row) in enumerate(df.iterrows()):
-                        result = analyze_narrative(row["narrative_text"])
-                        llm_adjustment.loc[idx] = result.suspicion_adjustment
-                        llm_keywords.loc[idx] = result.keywords
-                        llm_explanation.loc[idx] = result.explanation
-                        progress.progress((i + 1) / len(df))
-                    progress.empty()
+                / 100
+            )
+        else:
+            filter_value = st.slider(
+                "ML 점수 임계값 이상만 LLM 호출",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.3,
+                step=0.05,
+                key="filter_threshold_ui",
+            )
 
-            df["ml_score"] = ml_score
-            df["llm_keywords"] = llm_keywords
-            df["llm_explanation"] = llm_explanation
-            df["llm_suspicion_adjustment"] = llm_adjustment
-            df["combined_score"] = combine_scores(ml_score, llm_adjustment)
-            st.session_state.model = model
-            st.session_state.feature_cols = feature_cols
-            st.session_state.scored_df = df.sort_values("combined_score", ascending=False)
-        except Exception as e:
-            st.error(f"스코어링 중 오류가 발생했습니다: {e}")
+        preview = _hierarchical_filtering_preview(st.session_state.claims_df, filter_kind, filter_value)
+        if preview is not None:
+            net_delta = preview["net_delta_pct"]
+            cov_delta = preview["coverage_delta"]
+            base_msg = (
+                f"균형 프리셋(λ={HIERARCHICAL_FILTERING_PREVIEW_RISK_WEIGHT:,})·조사관 "
+                f"{HIERARCHICAL_FILTERING_PREVIEW_INVESTIGATORS}명×{HIERARCHICAL_FILTERING_PREVIEW_HOURS}시간 "
+                f"기준 실측: 전체 {preview['n_total']}건 중 {preview['n_selected']}건만 LLM 호출"
+                f"(호출 {preview['reduction_pct']:.1f}% 절감)"
+            )
+            if abs(net_delta) < 0.5 and abs(cov_delta) < 0.5:
+                st.success(f"{base_msg} — 전체 LLM 호출 대비 순회수액·고위험 커버리지 변화 없음(무손실 구간).")
+            else:
+                st.warning(
+                    f"{base_msg}이지만, 전체 LLM 호출 대비 순회수액 {net_delta:+.1f}% / "
+                    f"고위험 커버리지 {cov_delta:+.1f}%p 변화가 관측된 구간입니다. 결과를 확인한 뒤 "
+                    "진행하거나 안전 구간(예: 상위 50%, 임계값 0.3)으로 조정하세요."
+                )
+        else:
+            st.info(
+                "이 데이터에는 아직 LLM 분석 캐시가 없어 필터링 손실 여부를 사전에 시뮬레이션할 수 "
+                "없습니다(스킵될 건의 LLM 결과를 미리 알 수 없기 때문). 24건 샘플 데이터·균형 프리셋"
+                "(λ=50,000) 기준 검증에서는 상위 10/50/100%·임계값 0.3/0.5/0.85가 절감 최대 91.7%까지 "
+                "무손실이었고, 상위 20~30%·임계값 0.7 부근은 순회수액 -6.9%/커버리지 +16.7%p로 결과가 "
+                "달라졌습니다(scripts/hierarchical_filtering_results.md 참고) — 이 데이터에 그대로 "
+                "적용되지는 않으니 참고만 하세요."
+            )
+
+    if st.button("스코어링 실행"):
+        missing = _validate_columns(st.session_state.claims_df)
+        if missing:
+            st.error(f"필수 컬럼이 없어 스코어링을 실행할 수 없습니다: {', '.join(missing)}")
+        else:
+            df = st.session_state.claims_df.copy()
+            try:
+                feature_cols = feature_cols_for(df)
+                with st.spinner("ML 모델 학습 중..."):
+                    model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
+                    ml_score = predict_fraud_score(model, df[feature_cols])
+
+                if use_filtering:
+                    mask = (
+                        select_mask_top_pct(ml_score, filter_value)
+                        if filter_kind == "top_pct"
+                        else select_mask_threshold(ml_score, filter_value)
+                    )
+                else:
+                    mask = pd.Series(True, index=df.index)
+                n_total = len(df)
+                n_selected = int(mask.sum())
+                reduction_pct = 100 * (1 - n_selected / n_total) if n_total else 0.0
+                skip_note = "LLM 분석 스킵 (계층적 필터링 — ML 점수 기준 하위 우선순위)"
+
+                if "llm_suspicion_adjustment" in df.columns:
+                    st.info("사전 계산된 LLM 분석 결과를 재사용합니다 (추가 API 호출 없음).")
+                    llm_adjustment = df["llm_suspicion_adjustment"].where(mask, 0.0)
+                    # 캐시 CSV는 키워드를 "지연신고|블랙박스 미장착" 형태의 파이프 구분
+                    # 문자열로 저장한다(scripts/hierarchical_filtering.py의
+                    # get_or_build_llm_cache와 동일 포맷) — 리스트로 되돌려야 문자
+                    # 단위가 아니라 키워드 단위로 join/순회된다.
+                    llm_keywords_cached = (
+                        df.get("llm_keywords", pd.Series("", index=df.index))
+                        .fillna("")
+                        .apply(lambda s: [k for k in s.split("|") if k] if isinstance(s, str) else [])
+                    )
+                    llm_keywords = pd.Series(
+                        [kw if sel else [] for kw, sel in zip(llm_keywords_cached, mask)], index=df.index
+                    )
+                    llm_explanation = df.get("llm_explanation", pd.Series("", index=df.index)).where(
+                        mask, skip_note
+                    )
+                    if use_filtering:
+                        st.caption(
+                            f"⚠️ 캐시된 분석 결과를 사용 중이라 실제로는 API가 호출되지 않았습니다. "
+                            f"캐시 없이 이 필터링 설정으로 처음 분석했다면 전체 {n_total}건 중 "
+                            f"{n_selected}건만 호출되어 {reduction_pct:.1f}% 절감됐을 것입니다."
+                        )
+                else:
+                    llm_adjustment = pd.Series(0.0, index=df.index)
+                    llm_keywords = pd.Series([[]] * len(df), index=df.index)
+                    llm_explanation = pd.Series("", index=df.index)
+                    with st.spinner("사고경위서 이상징후 분석 중..."):
+                        selected_indices = df.index[mask]
+                        progress = st.progress(0.0)
+                        for i, idx in enumerate(selected_indices):
+                            result = analyze_narrative(df.loc[idx, "narrative_text"])
+                            llm_adjustment.loc[idx] = result.suspicion_adjustment
+                            llm_keywords.loc[idx] = result.keywords
+                            llm_explanation.loc[idx] = result.explanation
+                            progress.progress((i + 1) / max(len(selected_indices), 1))
+                        progress.empty()
+                    llm_explanation.loc[~mask] = skip_note
+                    if use_filtering:
+                        st.success(
+                            f"전체 {n_total}건 중 {n_selected}건만 LLM 분석 수행 "
+                            f"(호출 {reduction_pct:.1f}% 절감)."
+                        )
+
+                df["ml_score"] = ml_score
+                df["llm_keywords"] = llm_keywords
+                df["llm_explanation"] = llm_explanation
+                df["llm_suspicion_adjustment"] = llm_adjustment
+                df["llm_status"] = mask.map({True: "분석", False: "스킵(필터링)"})
+                df["combined_score"] = combine_scores(ml_score, llm_adjustment)
+                st.session_state.model = model
+                st.session_state.feature_cols = feature_cols
+                st.session_state.scored_df = df.sort_values("combined_score", ascending=False)
+            except Exception as e:
+                st.error(f"스코어링 중 오류가 발생했습니다: {e}")
 
 if st.session_state.scored_df is not None:
     st.dataframe(
         st.session_state.scored_df[
-            ["case_id", "combined_score", "llm_keywords", "llm_explanation", "expected_hours", "expected_recovery"]
+            [
+                "case_id",
+                "combined_score",
+                "llm_status",
+                "llm_keywords",
+                "llm_explanation",
+                "expected_hours",
+                "expected_recovery",
+            ]
         ],
         use_container_width=True,
     )
@@ -429,11 +605,17 @@ else:
 
         with st.expander("📝 LLM 요약", expanded=True):
             st.write(row.get("narrative_text", "") or "(사고경위서 없음)")
-            keywords = row.get("llm_keywords") or []
-            st.markdown(f"**이상징후 키워드:** {', '.join(keywords) if keywords else '없음'}")
-            explanation = row.get("llm_explanation") or ""
-            if explanation:
-                st.markdown(f"**의심 사유:** {explanation}")
+            if row.get("llm_status") == "스킵(필터링)":
+                st.caption(
+                    "🔕 계층적 필터링으로 이 사건은 LLM 분석이 스킵되었습니다 (ML 점수 기준 하위 "
+                    "우선순위) — 아래 키워드/의심 사유는 산출되지 않았고, 스코어는 ML 점수만 반영합니다."
+                )
+            else:
+                keywords = row.get("llm_keywords") or []
+                st.markdown(f"**이상징후 키워드:** {', '.join(keywords) if keywords else '없음'}")
+                explanation = row.get("llm_explanation") or ""
+                if explanation:
+                    st.markdown(f"**의심 사유:** {explanation}")
 
         st.subheader("✅ 조사 체크리스트")
         cached_checklist = st.session_state.guide_checklists.get(selected_case)

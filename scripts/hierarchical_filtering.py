@@ -41,6 +41,7 @@ from src.config import ANTHROPIC_MODEL  # noqa: E402
 from src.optimization.assignment import optimize_assignment  # noqa: E402
 from src.scoring.combine import combine_scores  # noqa: E402
 from src.scoring.features import feature_cols_for  # noqa: E402
+from src.scoring.hierarchical_filtering import select_mask_threshold, select_mask_top_pct  # noqa: E402
 from src.scoring.llm_analysis import analyze_narrative, get_usage_totals, reset_usage_totals  # noqa: E402
 from src.scoring.ml_model import predict_fraud_score, train_fraud_model  # noqa: E402
 
@@ -113,20 +114,6 @@ def build_ml_scores(df: pd.DataFrame) -> pd.Series:
     feature_cols = feature_cols_for(df)
     model, _ = train_fraud_model(df[feature_cols + [LABEL_COL]], class_weight="balanced")
     return predict_fraud_score(model, df[feature_cols])
-
-
-def select_mask_top_pct(ml_score: pd.Series, pct: float) -> pd.Series:
-    """ml_score 상위 pct 비율(0~1)에 해당하는 사건만 True (LLM 호출 대상)."""
-    if pct >= 1.0:
-        return pd.Series(True, index=ml_score.index)
-    n_selected = max(1, int(len(ml_score) * pct))
-    rank_cutoff = ml_score.sort_values(ascending=False).iloc[n_selected - 1]
-    return ml_score >= rank_cutoff
-
-
-def select_mask_threshold(ml_score: pd.Series, threshold: float) -> pd.Series:
-    """ml_score >= threshold 인 사건만 True (LLM 호출 대상)."""
-    return ml_score >= threshold
 
 
 def apply_hierarchical_filtering(
