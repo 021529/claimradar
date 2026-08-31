@@ -671,6 +671,7 @@ else:
                     f"ML 스코어 {ml_score:.2f} × {SCORE_WEIGHT_ML} + "
                     f"LLM 보정 {llm_adj:+.2f} × {SCORE_WEIGHT_LLM}"
                 )
+                st.caption(f"LLM 가중치 {SCORE_WEIGHT_LLM}은 MVP 시연용 설계값이며, 탐지 성능 최적화로 검증된 값이 아닙니다.")
             else:
                 st.markdown(f"**결합 스코어 {row['combined_score']:.2f}**")
             if st.session_state.model is not None:
@@ -696,7 +697,7 @@ else:
                 )
             else:
                 keywords = row.get("llm_keywords") or []
-                st.markdown(f"**이상징후 키워드:** {', '.join(keywords) if keywords else '없음'}")
+                st.markdown(f"**사고 정황 키워드:** {', '.join(keywords) if keywords else '없음'}")
                 explanation = row.get("llm_explanation") or ""
                 if explanation:
                     st.markdown(f"**의심 사유:** {explanation}")
