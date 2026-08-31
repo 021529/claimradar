@@ -72,4 +72,9 @@ def optimize_assignment(
             if x[c, i].solution_value() > 0.5:
                 cases.at[c, "assigned_investigator"] = i
 
+    # DataFrame.attrs는 컬럼/값과 무관한 부가 메타데이터라 기존 호출부(테스트 포함)의
+    # 동작에 영향을 주지 않는다 — app.py가 "최적해(OPTIMAL)"인지 "1.5초 제한시간 내
+    # 실행가능해(FEASIBLE)"인지 화면에 구분 표시하기 위해 추가.
+    cases.attrs["solver_status"] = "OPTIMAL" if status == pywraplp.Solver.OPTIMAL else "FEASIBLE"
+
     return cases

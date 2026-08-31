@@ -35,6 +35,7 @@ for key in [
     "feature_cols",
     "baseline_result",
     "optimized_result",
+    "solver_status",
 ]:
     st.session_state.setdefault(key, None)
 st.session_state.setdefault("guide_checklists", {})
@@ -230,6 +231,15 @@ def _lambda_regime(risk_weight: int) -> str:
     if risk_weight < POLICY_PRESETS["고위험 차단 우선"]:
         return "균형(전환) 구간"
     return "고위험 차단 우선 구간"
+
+
+def _policy_label_for_lambda(risk_weight: float) -> str:
+    """현재 λ와 정확히 일치하는 정책 프리셋 이름을 역조회 (고급 설정으로 직접
+    조정했다면 어느 프리셋과도 안 맞을 수 있음)."""
+    for label, value in POLICY_PRESETS.items():
+        if value == risk_weight:
+            return label
+    return "사용자 지정"
 
 
 st.header("1. 청구 데이터")
@@ -538,6 +548,9 @@ elif st.button("배정 실행"):
             st.session_state.optimized_result = optimize_assignment(
                 cases, num_investigators, hours_per_investigator, risk_weight=risk_weight
             )
+            st.session_state.solver_status = st.session_state.optimized_result.attrs.get(
+                "solver_status", "OPTIMAL"
+            )
     except Exception as e:
         st.error(f"배정 계산 중 오류가 발생했습니다: {e}")
         st.session_state.baseline_result = None
@@ -642,7 +655,17 @@ if st.session_state.optimized_result is not None:
         fig_cov.update_layout(showlegend=False, yaxis_title="고위험 커버리지 (%)", yaxis_range=[0, 100])
         st.plotly_chart(fig_cov, use_container_width=True)
 
+    solver_status = st.session_state.solver_status or "OPTIMAL"
+    solver_status_label = (
+        "최적해에 포함된 배정" if solver_status == "OPTIMAL" else "제한시간 내 도출된 실행가능해에 포함된 배정"
+    )
+    policy_label = _policy_label_for_lambda(risk_weight)
+
     st.subheader("조사관별 담당 사건")
+    remaining_by_investigator = {
+        int(inv): hours_per_investigator - optimized[optimized["assigned_investigator"] == inv]["expected_hours"].sum()
+        for inv in sorted(optimized["assigned_investigator"].dropna().unique())
+    }
     for inv in sorted(optimized["assigned_investigator"].dropna().unique()):
         cases_for_inv = optimized[optimized["assigned_investigator"] == inv]
         with st.expander(f"조사관 {int(inv) + 1} — {len(cases_for_inv)}건"):
@@ -650,6 +673,57 @@ if st.session_state.optimized_result is not None:
                 cases_for_inv[["case_id", "combined_score", "expected_hours", "expected_recovery"]],
                 use_container_width=True,
             )
+
+            rationale_case = st.selectbox(
+                "배정 근거 보기",
+                cases_for_inv["case_id"].tolist(),
+                key=f"rationale_case_inv_{int(inv)}",
+            )
+            r = cases_for_inv[cases_for_inv["case_id"] == rationale_case].iloc[0]
+            objective_contribution = (r["expected_recovery"] - r["investigation_cost"]) + risk_weight * r["combined_score"]
+            st.markdown(
+                f"- **{solver_status_label}** ({solver_status})\n"
+                f"- 위험도(결합 스코어): **{r['combined_score']:.2f}**\n"
+                f"- 예상 회수액: {r['expected_recovery']:,.0f} / 예상 조사시간: {r['expected_hours']:.0f}시간 / "
+                f"조사비용: {r['investigation_cost']:,.0f}\n"
+                f"- 조사관 {int(inv) + 1} 잔여 가용시간: {remaining_by_investigator[int(inv)]:.0f}시간 / "
+                f"{hours_per_investigator}시간\n"
+                f"- 현재 정책: {policy_label} (λ={risk_weight:,})\n"
+                f"- 목적함수 기여도: (회수액-조사비용) + λ×위험도 = **{objective_contribution:,.0f}**"
+            )
+            st.caption(
+                "제한된 조사시간 내에서 기대효과와 위험도를 함께 고려했을 때 이 배정이 "
+                f"{'최적해' if solver_status == 'OPTIMAL' else '제한시간 내 실행가능해'}에 포함되었습니다."
+            )
+
+    high_risk_unassigned = optimized[
+        optimized["assigned_investigator"].isna() & optimized["case_id"].isin(high_risk_case_ids)
+    ]
+    if not high_risk_unassigned.empty:
+        st.subheader("배정되지 않은 고위험 사건")
+        max_remaining = max(remaining_by_investigator.values()) if remaining_by_investigator else 0.0
+        for _, r in high_risk_unassigned.iterrows():
+            with st.expander(f"사건 {r['case_id']} — 위험도 {r['combined_score']:.2f} (미배정)"):
+                hypothetical_contribution = (
+                    r["expected_recovery"] - r["investigation_cost"]
+                ) + risk_weight * r["combined_score"]
+                st.markdown(
+                    f"- 위험도(결합 스코어): **{r['combined_score']:.2f}** (고위험 상위 20%에 포함)\n"
+                    f"- 예상 회수액: {r['expected_recovery']:,.0f} / 예상 조사시간: {r['expected_hours']:.0f}시간 / "
+                    f"조사비용: {r['investigation_cost']:,.0f}\n"
+                    f"- 배정됐다면의 목적함수 기여도: {hypothetical_contribution:,.0f}"
+                )
+                if r["expected_hours"] > max_remaining:
+                    st.caption(
+                        f"이 사건의 예상 조사시간({r['expected_hours']:.0f}시간)이 모든 조사관의 최종 잔여 "
+                        f"가용시간(최대 {max_remaining:.0f}시간)보다 커서, 이번 배정 결과에서는 어느 조사관에게도 "
+                        "추가로 배정될 수 없었습니다."
+                    )
+                else:
+                    st.caption(
+                        "잔여 가용시간이 있는 조사관이 있었지만, 목적함수(기대효과+위험도 가중합) 기준으로 "
+                        "다른 사건 조합이 총합을 더 높여 이번 최적해에는 포함되지 않았습니다."
+                    )
 
 st.header("5. 사건 상세 & AI 조사 가이드")
 if st.session_state.optimized_result is None:
