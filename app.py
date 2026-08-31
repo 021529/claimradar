@@ -689,10 +689,10 @@ if st.session_state.optimized_result is not None:
                 f"- 조사관 {int(inv) + 1} 잔여 가용시간: {remaining_by_investigator[int(inv)]:.0f}시간 / "
                 f"{hours_per_investigator}시간\n"
                 f"- 현재 정책: {policy_label} (λ={risk_weight:,})\n"
-                f"- 목적함수 기여도: (회수액-조사비용) + λ×위험도 = **{objective_contribution:,.0f}**"
+                f"- 사건별 목적함수 값: (회수액-조사비용) + λ×위험도 = **{objective_contribution:,.0f}**"
             )
             st.caption(
-                "제한된 조사시간 내에서 기대효과와 위험도를 함께 고려했을 때 이 배정이 "
+                "제한된 조사시간 내에서 현재 정책의 목적함수를 최대화하도록 이 배정이 "
                 f"{'최적해' if solver_status == 'OPTIMAL' else '제한시간 내 실행가능해'}에 포함되었습니다."
             )
 
@@ -711,7 +711,7 @@ if st.session_state.optimized_result is not None:
                     f"- 위험도(결합 스코어): **{r['combined_score']:.2f}** (고위험 상위 20%에 포함)\n"
                     f"- 예상 회수액: {r['expected_recovery']:,.0f} / 예상 조사시간: {r['expected_hours']:.0f}시간 / "
                     f"조사비용: {r['investigation_cost']:,.0f}\n"
-                    f"- 배정됐다면의 목적함수 기여도: {hypothetical_contribution:,.0f}"
+                    f"- 배정됐다면의 사건별 목적함수 값: {hypothetical_contribution:,.0f}"
                 )
                 if r["expected_hours"] > max_remaining:
                     st.caption(
@@ -726,9 +726,9 @@ if st.session_state.optimized_result is not None:
                     )
                 if risk_weight == 0:
                     st.caption(
-                        f"현재 정책({policy_label}, λ=0)에서는 목적함수에 위험도가 반영되지 않아 기대 "
-                        "회수액이 큰 사건이 우선 선택됩니다. 고위험 건 커버리지를 높이려면 '균형' 또는 "
-                        "'고위험 차단 우선' 정책을 선택하세요."
+                        f"{policy_label} 정책에서는 위험도 항의 가중치(λ)가 0이므로, 위험도보다 목적함수상 "
+                        "순편익(기대 회수액-조사비용)과 조사 자원 제약을 중심으로 배정됩니다. 고위험 건 "
+                        "커버리지를 높이려면 '균형' 또는 '고위험 차단 우선' 정책을 선택하세요."
                     )
 
 st.header("5. 사건 상세 & AI 조사 가이드")
