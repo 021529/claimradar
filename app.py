@@ -724,6 +724,12 @@ if st.session_state.optimized_result is not None:
                         "잔여 가용시간이 있는 조사관이 있었지만, 목적함수(기대효과+위험도 가중합) 기준으로 "
                         "다른 사건 조합이 총합을 더 높여 이번 최적해에는 포함되지 않았습니다."
                     )
+                if risk_weight == 0:
+                    st.caption(
+                        f"현재 정책({policy_label}, λ=0)에서는 목적함수에 위험도가 반영되지 않아 기대 "
+                        "회수액이 큰 사건이 우선 선택됩니다. 고위험 건 커버리지를 높이려면 '균형' 또는 "
+                        "'고위험 차단 우선' 정책을 선택하세요."
+                    )
 
 st.header("5. 사건 상세 & AI 조사 가이드")
 if st.session_state.optimized_result is None:
